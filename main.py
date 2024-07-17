@@ -118,7 +118,9 @@ def print_attribute_model_hierarchy(amh: dict) -> None:
     print_node(amh, 0)
 
 
-def get_mrcm_domain_reference_set_entries(branch_path: BranchPath) -> list[dict]:
+def get_mrcm_domain_reference_set_entries(
+    branch_path: BranchPath,
+) -> list[dict]:
     total = 0
     offset = 0
     step = 100
@@ -168,7 +170,8 @@ if __name__ == "__main__":
         if SCTID(component["conceptId"]) not in WHITELISTED_SUPERTYPES:
             continue
         print(
-            f"For concept {component['conceptId']}" + f"| {component['pt']['term']} |:"
+            f"For concept {component['conceptId']}"
+            + f"| {component['pt']['term']} |:"
         )
         print(json.dumps(entry["additionalFields"], indent=2))
         print()
@@ -179,5 +182,6 @@ if __name__ == "__main__":
             continue
         component = entry["referencedComponent"]
         print(
-            f"For concept {component['conceptId']}" + f"| {component['pt']['term']} |;"
+            f"For concept {component['conceptId']}"
+            + f"| {component['pt']['term']} |;"
         )
