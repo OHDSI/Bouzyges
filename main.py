@@ -1,9 +1,6 @@
 import requests
 import json
 
-SNOWSTORM_API = "http://localhost:8080/"
-TARGET_CODESYSTEM = "SNOMEDCT"
-MRCM_DOMAIN_REFERENCE_SET_ECL = "<<723589008"
 
 ## Typing
 class BranchPath(str):
@@ -13,8 +10,26 @@ class BranchPath(str):
 class SCTID(int):
     pass
 
+
 class Term(str):
     pass
+
+
+class ECLExpression(str):
+    pass
+
+
+## Connection constants
+SNOWSTORM_API = "http://localhost:8080/"
+TARGET_CODESYSTEM = "SNOMEDCT"
+
+## Logic constants
+MRCM_DOMAIN_REFERENCE_SET_ECL = ECLExpression("<<723589008")
+WHITELISTED_SUPERTYPES: set[SCTID] = {
+    SCTID(404684003),  # Clinical finding
+    SCTID(71388002),  # Procedure
+}
+
 
 ## Classes
 class SemanticPortrait:
@@ -82,6 +97,7 @@ def get_branch_info(branch_path: BranchPath) -> dict:
 
     return response.json()
 
+
 def get_attribute_model_hierarchy(branch_path: BranchPath) -> dict:
     response = requests.get(
         SNOWSTORM_API + f"mrcm/{branch_path}/concept-model-attribute-hierarchy",
@@ -91,6 +107,7 @@ def get_attribute_model_hierarchy(branch_path: BranchPath) -> dict:
         raise SnowstormRequestError.from_response(response)
 
     return response.json()
+
 
 def print_attribute_model_hierarchy(amh: dict) -> None:
     def print_node(node, indent):
@@ -129,26 +146,38 @@ def get_mrcm_domain_reference_set_entries(branch_path: BranchPath) -> list[dict]
 
     return collected_items
 
+
 if __name__ == "__main__":
     print("Snowstorm Verson:" + get_version())
-    branch_path = get_main_branch_path()
-    print("Using branch path:", branch_path)
+    branch = get_main_branch_path()
+    print("Using branch path:", branch)
 
-    branch_info = get_branch_info(branch_path)
+    branch_info = get_branch_info(branch)
     # print("Branch Info:")
     # print(json.dumps(branch_info, indent=2))
 
-    attribute_model_hierarchy = get_attribute_model_hierarchy(branch_path)
+    attribute_model_hierarchy = get_attribute_model_hierarchy(branch)
     # print("Attribute Model Hierarchy:")
     # print_attribute_model_hierarchy(attribute_model_hierarchy)
 
     print("MRCM Domain Reference Set entries:")
-    domain_refset_entries = get_mrcm_domain_reference_set_entries(
-            branch_path)
+    domain_refset_entries = get_mrcm_domain_reference_set_entries(branch)
 
     for entry in domain_refset_entries:
         component = entry["referencedComponent"]
-        print(f"For concept {component['conceptId']}"
-              f"| {component['pt']['term']} |:")
+        if SCTID(component["conceptId"]) not in WHITELISTED_SUPERTYPES:
+            continue
+        print(
+            f"For concept {component['conceptId']}" + f"| {component['pt']['term']} |:"
+        )
         print(json.dumps(entry["additionalFields"], indent=2))
         print()
+
+    # Now print all supertypes
+    for entry in domain_refset_entries:
+        if SCTID(component["conceptId"]) not in WHITELISTED_SUPERTYPES:
+            continue
+        component = entry["referencedComponent"]
+        print(
+            f"For concept {component['conceptId']}" + f"| {component['pt']['term']} |;"
+        )
