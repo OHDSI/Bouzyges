@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Iterable
 
 
+# Boilerplate
 ## Typing
 class BranchPath(str):
     pass
@@ -38,20 +39,24 @@ class BooleanAnswer(str):
 
 
 ## Connection constants
+### Snowstorm API
 SNOWSTORM_API = URL("http://localhost:8080/")
 TARGET_CODESYSTEM = "SNOMEDCT"
 
 ## Logic constants
+### MRCM
 MRCM_DOMAIN_REFERENCE_SET_ECL = ECLExpression("<<723589008")
 WHITELISTED_SUPERTYPES: set[SCTID] = {
     SCTID(404684003),  # Clinical finding
     SCTID(71388002),  # Procedure
 }
 
-NULL_ANSWER = EscapeHatch()  # Singleton for null answers
+### Escape hatch sentinel
+NULL_ANSWER = EscapeHatch()
 
 
 ## Dataclasses
+### SNOMED modelling
 @dataclass(frozen=True, slots=True)
 class AttributeRelationship:
     """Represents a SNOMED CT attribute relationship."""
@@ -66,18 +71,6 @@ class AttributeGroup:
 
     group_id: SCTID
     relationships: frozenset[AttributeRelationship]
-
-
-@dataclass
-class SemanticPortrait:
-    """\
-Represents an interactively built semantic portrait of a source concept."""
-
-    def __init__(self, term: str, context: str | None = None) -> None:
-        self.source_term: str = term
-        self.context: Iterable[str] | None = context
-        self.ancestor_anchors: set[SCTID] = set()
-        self.attributes: dict[SCTID, SCTID] = {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +115,19 @@ more useful information for domain modelling, but it is not yet well explored.
         )
 
 
+### Mutable portrait
+@dataclass
+class SemanticPortrait:
+    """\
+Represents an interactively built semantic portrait of a source concept."""
+
+    def __init__(self, term: str, context: str | None = None) -> None:
+        self.source_term: str = term
+        self.context: Iterable[str] | None = context
+        self.ancestor_anchors: set[SCTID] = set()
+        self.attributes: dict[SCTID, SCTID] = {}
+
+
 ## Exceptions
 class SnowstormAPIError(Exception):
     """Raised when the Snowstorm API returns a bad response."""
@@ -146,16 +152,164 @@ class PrompterError(Exception):
     """Raised when the prompter encounters an error."""
 
 
-## Logic classes
-class Prompter(ABC):
+# Logic classes
+## Logic prompt format classes
+class PromptFormat(ABC):
     """\
-Abstract class for forming and sending prompt requests to the LLM agent.
+Abstract class for formatting prompts for the LLM agent.
 """
 
+    ROLE: str
+    TASK: str
+    REQUIREMENTS: str
+    INSTRUCTIONS: str
+    ESCAPE_INSTRUCTIONS: str
+
     @staticmethod
-    def wrap_term(term: Term) -> str:
-        """Wrap a term in brackets."""
+    def wrap_term(term: str) -> str:
+        """Wrap a term in square brackets."""
         return f"[{term}]"
+
+    @classmethod
+    def form_supertype(
+        cls,
+        term: str,
+        options: Iterable[Term],
+        allow_escape: bool = True,
+        term_context: str | None = None,
+        options_context: dict[Term, str] | None = None,
+    ) -> str:
+        """\
+Format a prompt for the LLM agent to choose the best matching proximal ancestor
+for a term.
+"""
+        _ = term, options, allow_escape, term_context, options_context
+        raise NotImplementedError
+
+    @classmethod
+    def form_attr_presence(
+        cls,
+        term: str,
+        attribute: Term,
+        term_context: str | None = None,
+        attribute_context: str | None = None,
+    ) -> str:
+        """\
+Format a prompt for the LLM agent to decide if an attribute is present in a term.
+"""
+        _ = term, attribute, term_context, attribute_context
+        raise NotImplementedError
+
+    @classmethod
+    def form_attr_value(
+        cls,
+        term: str,
+        attribute: Term,
+        options: Iterable[Term],
+        term_context: str | None = None,
+        options_context: dict[Term, str] | None = None,
+        allow_escape: bool = True,
+    ) -> str:
+        """\
+Format a prompt for the LLM agent to choose the value of an attribute in a term.
+"""
+        _ = (
+            term,
+            attribute,
+            options,
+            term_context,
+            options_context,
+            allow_escape,
+        )
+        raise NotImplementedError
+
+
+class DefaultPromptFormat(PromptFormat):
+    """\
+Default verbose prompt format for the LLM agent.
+    """
+
+    ROLE = (
+        "a domain expert in clinical terminology who is helping to build a "
+        "semantic portrait of a concept in a clinical terminology system"
+    )
+    TASK = (
+        "to provide information about the given term supertypes, "
+        "attributes, attribute values, and other relevant information as "
+        "requested"
+    )
+    REQUIREMENTS = (
+        "in addition to providing accurate factually correct information, "
+        "it is critically important that you provide answer in a "
+        "format that is requested by the system, as answers will "
+        "be parsed by a machine. Your answer should end with a line that says "
+        "'The answer is ' and the chosen option"
+    )
+    INSTRUCTIONS = (
+        "Options that speculate about details not explicitly included in the"
+        "term meaning are to be avoided, e.g. term 'operation on abdominal "
+        "region' should not be assumed to be a laparoscopic operation, as "
+        "access method is not specified in the term. It is encouraged to "
+        "explain your reasoning when providing answers. The automated system "
+        "will look for the last answer surrounded by square brackets, e.g. "
+        "[answer], so only one of the options should be selected and returned "
+        "in this format. If the question looks like 'What is the topography of "
+        "the pulmonary tuberculosis?', and the options are [Lung structure], "
+        "[Heart structure], [Kidney structure], the good answer would look "
+        "like 'As the term 'pulmonary' refers to a disease of the lungs, "
+        "the topography should be [Lung structure].' If you are not sure about "
+        "the answer, you are encouraged to think aloud, analyzing the options."
+    )
+
+    ESCAPE_INSTRUCTIONS = (
+        "If all provided options are incorrect, or imply extra information "
+        "not present in the term, you must explain why each option is "
+        "incorrect, and finalize the answer with the word "
+        f"{EscapeHatch.WORD}."
+    )
+
+    @classmethod
+    def form_supertype(
+        cls,
+        term: str,
+        options: Iterable[Term],
+        allow_escape: bool = True,
+        term_context: str | None = None,
+        options_context: dict[Term, str] | None = None,
+    ) -> str:
+        prompt = ""
+        prompt += "You are " + cls.ROLE + ".\n\n"
+        prompt += "Your assignment is " + cls.TASK + ".\n\n"
+        prompt += "Please note that " + cls.REQUIREMENTS + ".\n\n"
+        prompt += "Your exact instructions are:\n\n"
+        prompt += cls.INSTRUCTIONS + (allow_escape * cls.ESCAPE_INSTRUCTIONS)
+        prompt += "\n\n"
+
+        prompt += (
+            f"Given the term '{term}', what is the closest supertype "
+            "of it's meaning?"
+        )
+        if term_context:
+            prompt += " Following information is provided about the term: "
+            prompt += term_context
+
+        prompt += "\n\nOptions, in no particular order:\n"
+        for option in options:
+            prompt += f" - {cls.wrap_term(option)}"
+            if options_context and option in options_context:
+                prompt += f": {options_context[option]}"
+            prompt += "\n"
+        # Remind of the escape hatch, just in case
+        if allow_escape:
+            prompt += f" - {EscapeHatch.WORD}: " "None of the above\n"
+        return prompt
+
+
+## Logic prompter classes
+class Prompter(ABC):
+    """\
+Interfaces prompts to the LLM agent and parses answers.
+"""
 
     def unwrap_class_answer(
         self,
@@ -181,7 +335,9 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
                     "Could not find a unique option in the answer:", answer
                 )
 
-        wrapped_options = {self.wrap_term(option): option for option in options}
+        wrapped_options = {
+            PromptFormat.wrap_term(option): option for option in options
+        }
 
         if escape_hatch is not None:
             wrapped_options = {
@@ -236,9 +392,9 @@ Check if the answer contains a yes or no option.
 
     # Following methods are abstract and represent common queries to the model
     @abstractmethod
-    def prompt_for_supertype(
+    def prompt_supertype(
         self,
-        term: Term,
+        term: str,
         options: Iterable[Term],
         allow_escape: bool = True,
         term_context: str | None = None,
@@ -249,9 +405,9 @@ Prompt the model to choose the best matching proximal ancestor for a term.
 """
 
     @abstractmethod
-    def prompt_for_attribute_presence(
+    def prompt_attr_presence(
         self,
-        term: Term,
+        term: str,
         attribute: Term,
         term_context: str | None = None,
         attribute_context: str | None = None,
@@ -261,9 +417,9 @@ Prompt the model to decide if an attribute is present in a term.
 """
 
     @abstractmethod
-    def prompt_for_attribute_value(
+    def prompt_attr_value(
         self,
-        term: Term,
+        term: str,
         attribute: Term,
         options: Iterable[Term],
         term_context: str | None = None,
@@ -282,79 +438,18 @@ A test prompter that interacts with a meatbag to get answers.
 TODO: Interface with a shock collar.
 """
 
-    ROLE = (
-        "a domain expert in clinical terminology who is helping to build a "
-        "semantic portrait of a concept in a clinical terminology system"
-    )
-    TASK = (
-        "to provide information about the given term supertypes, "
-        "attributes, attribute values, and other relevant information as "
-        "requested"
-    )
-    REQUIREMENTS = (
-        "in addition to providing accurate factually correct information, "
-        "it is critically important that you provide answer in a "
-        "format that is requested by the system, as answers will "
-        "be parsed by a machine. Your answer should end with a line that says "
-        "'The answer is ' and the chosen option"
-    )
-    INSTRUCTIONS = (
-        "Options that speculate about details not explicitly included in the"
-        "term meaning are to be avoided, e.g. term 'operation on abdominal "
-        "region' should not be assumed to be a laparoscopic operation, as "
-        "access method is not specified in the term. It is encouraged to "
-        "explain your reasoning when providing answers. The automated system "
-        "will look for the last answer surrounded by square brackets, e.g. "
-        "[answer], so only one of the options should be selected and returned "
-        "in this format. If the question looks like 'What is the topography of "
-        "the pulmonary tuberculosis?', and the options are [Lung structure], "
-        "[Heart structure], [Kidney structure], the good answer would look "
-        "like 'As the term 'pulmonary' refers to a disease of the lungs, "
-        "the topography should be [Lung structure].' If you are not sure about "
-        "the answer, you are encouraged to think aloud, analyzing the options."
-    )
-
-    ESCAPE_INSTRUCTIONS = (
-        "If all provided options are incorrect, or imply extra information "
-        "not present in the term, you must explain why each option is "
-        "incorrect, and finalize the answer with the word "
-        f"{EscapeHatch.WORD}."
-    )
-
-    def prompt_for_supertype(
+    def prompt_supertype(
         self,
-        term: Term,
+        term: str,
         options: Iterable[Term],
         allow_escape: bool = True,
         term_context: str | None = None,
         options_context: dict[Term, str] | None = None,
     ) -> Term | EscapeHatch:
         # Construct the prompt
-        prompt = ""
-        prompt += "You are " + self.ROLE + ".\n\n"
-        prompt += "Your assignment is " + self.TASK + ".\n\n"
-        prompt += "Please note that " + self.REQUIREMENTS + ".\n\n"
-        prompt += "Your exact instructions are:\n\n"
-        prompt += self.INSTRUCTIONS + (allow_escape * self.ESCAPE_INSTRUCTIONS)
-        prompt += "\n\n"
-
-        prompt += (
-            f"Given the term '{term}', what is the closest supertype "
-            "of it's meaning?"
+        prompt = DefaultPromptFormat.form_supertype(
+            term, options, allow_escape, term_context, options_context
         )
-        if term_context:
-            prompt += " Following information is provided about the term: "
-            prompt += term_context
-
-        prompt += "\n\nOptions, in no particular order:\n"
-        for option in options:
-            prompt += f" - {self.wrap_term(option)}"
-            if options_context and option in options_context:
-                prompt += f": {options_context[option]}"
-            prompt += "\n"
-        # Remind of the escape hatch, just in case
-        if allow_escape:
-            prompt += f" - {EscapeHatch.WORD}: " "None of the above\n"
 
         # Get the answer
         while True:
@@ -370,9 +465,9 @@ TODO: Interface with a shock collar.
                 print("Error:", e)
                 print("Please, provide an answer in the requested format.")
 
-    def prompt_for_attribute_presence(
+    def prompt_attr_presence(
         self,
-        term: Term,
+        term: str,
         attribute: Term,
         term_context: str | None = None,
         attribute_context: str | None = None,
@@ -380,9 +475,9 @@ TODO: Interface with a shock collar.
         _ = term, attribute, term_context, attribute_context
         raise NotImplementedError
 
-    def prompt_for_attribute_value(
+    def prompt_attr_value(
         self,
-        term: Term,
+        term: str,
         attribute: Term,
         options: Iterable[Term],
         term_context: str | None = None,
@@ -523,9 +618,19 @@ if __name__ == "__main__":
         print()
 
     # Test
-    term = Term("Pyogenic liver abscess")
+    portrait = SemanticPortrait("Pyogenic liver abscess")
     prompter = HumanPrompter()
-    supertypes = [Term(entry.term) for entry in mrcm_entries]
-    supertype = prompter.prompt_for_supertype(term, supertypes)
+    supertypes = {entry.term: entry.sctid for entry in mrcm_entries}
+    supertype = prompter.prompt_supertype(
+        term=portrait.source_term,
+        options=supertypes.keys(),
+        allow_escape=False,
+        term_context="; ".join(portrait.context) if portrait.context else None,
+    )
+    match supertype:
+        case Term(term):
+            supertype = supertypes[term]
+        case _:
+            raise ValueError("Should not happen!")
 
     print("Selected supertype:", supertype)
