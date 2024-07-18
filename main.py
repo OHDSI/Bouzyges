@@ -25,6 +25,18 @@ class URL(str):
     pass
 
 
+class EscapeHatch(object):
+    WORD: Term = Term("[NONE]")
+
+
+class BooleanAnswer(str):
+    YES = Term("[AYE]")
+    NO = Term("[NAY]")
+
+    def __new__(cls, value: bool):
+        return cls.YES if value else cls.NO
+
+
 ## Connection constants
 SNOWSTORM_API = URL("http://localhost:8080/")
 TARGET_CODESYSTEM = "SNOMEDCT"
@@ -35,6 +47,8 @@ WHITELISTED_SUPERTYPES: set[SCTID] = {
     SCTID(404684003),  # Clinical finding
     SCTID(71388002),  # Procedure
 }
+
+NULL_ANSWER = EscapeHatch()  # Singleton for null answers
 
 
 ## Dataclasses
@@ -82,11 +96,11 @@ more useful information for domain modelling, but it is not yet well explored.
     # Additional fields
     domain_constraint: ECLExpression
     guide_link: URL  # For eventual RAG connection
-    parent_domain: ECLExpression | None = None
-    proximal_primitive_refinement: ECLExpression | None = None
     # Currently uses unparseable extension of ECL grammar,
     # but one day we will use it
     domain_template: ECLExpression
+    parent_domain: ECLExpression | None = None
+    proximal_primitive_refinement: ECLExpression | None = None
 
     @classmethod
     def from_json(cls, json_data: dict):
@@ -144,13 +158,18 @@ Abstract class for forming and sending prompt requests to the LLM agent.
         return f"[{term}]"
 
     def unwrap_class_answer(
-        self, answer: str, options: Iterable[Term] = ()
-    ) -> Term:
+        self,
+        answer: str,
+        options: Iterable[Term] = (),
+        escape_hatch: Term | None = EscapeHatch.WORD,
+    ) -> Term | EscapeHatch:
         """\
 Check if answer has exactly one valid option.
 
 Assumes that the answer is a valid option if it is wrapped in brackets.
 """
+        answer = answer.strip().splitlines()[-1]
+
         if not options:
             # Return the answer in brackets, if there is one
             if answer.count("[") == answer.count("]") == 1:
@@ -162,26 +181,50 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
                     "Could not find a unique option in the answer:", answer
                 )
 
-        # Check if there is exactly one option present
-        wrapped_options = [self.wrap_term(option) for option in options]
+        wrapped_options = {self.wrap_term(option): option for option in options}
+
+        if escape_hatch is not None:
+            wrapped_options = {
+                **wrapped_options,
+                EscapeHatch.WORD: escape_hatch,
+            }
+
         counts = {}
         for option in wrapped_options:
             counts[option] = answer.count(option)
 
-        if sum(map(bool, counts.values())) != 1:
+        # Check if there is exactly one option present
+        if sum(map(bool, counts.values())) == 1:
+            for option, count in counts.items():
+                if count:
+                    return (
+                        Term(option[1:-1])
+                        if option != escape_hatch
+                        else NULL_ANSWER
+                    )
+
+        # Return the last encountered option in brackets
+        indices: dict[Term | EscapeHatch, int] = {
+            option: answer.rfind(wrapped)
+            for wrapped, option in wrapped_options.items()
+        }
+        if all(index == -1 for index in indices.values()):
             raise PrompterError(
                 "Could not find a unique option in the answer:", answer
             )
 
-        for option, count in counts.items():
-            if count:
-                return Term(option[1:-1])
+        return max(indices, key=lambda k: indices.get(k, -1))
 
-    def unwrap_bool_answer(self, answer: str, yes: str, no: str) -> bool:
+    def unwrap_bool_answer(
+        self,
+        answer: str,
+        yes: str = BooleanAnswer.YES,
+        no: str = BooleanAnswer.NO,
+    ) -> bool:
         """\
 Check if the answer contains a yes or no option.
 """
-        words = answer.split()
+        words = answer.strip().splitlines()[-1].split()
         if yes in words and no not in words:
             return True
         elif no in words and yes not in words:
@@ -191,19 +234,170 @@ Check if the answer contains a yes or no option.
                 "Could not find an unambiguous boolean answer in the response"
             )
 
+    # Following methods are abstract and represent common queries to the model
     @abstractmethod
-    def prompt_for_ancestor(self, term: Term, options: Iterable[Term]) -> Term:
+    def prompt_for_supertype(
+        self,
+        term: Term,
+        options: Iterable[Term],
+        allow_escape: bool = True,
+        term_context: str | None = None,
+        options_context: dict[Term, str] | None = None,
+    ) -> Term | EscapeHatch:
         """\
-Prompt the model to choose the best matching ancestor for a term.
+Prompt the model to choose the best matching proximal ancestor for a term.
 """
 
     @abstractmethod
     def prompt_for_attribute_presence(
-        self, term: Term, attribute: Term
+        self,
+        term: Term,
+        attribute: Term,
+        term_context: str | None = None,
+        attribute_context: str | None = None,
     ) -> bool:
         """\
-Prompt the model to choose if an attribute is present in a term.
+Prompt the model to decide if an attribute is present in a term.
 """
+
+    @abstractmethod
+    def prompt_for_attribute_value(
+        self,
+        term: Term,
+        attribute: Term,
+        options: Iterable[Term],
+        term_context: str | None = None,
+        options_context: dict[Term, str] | None = None,
+        allow_escape: bool = True,
+    ) -> Term | EscapeHatch:
+        """\
+Prompt the model to choose the value of an attribute in a term.
+"""
+
+
+class HumanPrompter(Prompter):
+    """\
+A test prompter that interacts with a meatbag to get answers.
+
+TODO: Interface with a shock collar.
+"""
+
+    ROLE = (
+        "a domain expert in clinical terminology who is helping to build a "
+        "semantic portrait of a concept in a clinical terminology system"
+    )
+    TASK = (
+        "to provide information about the given term supertypes, "
+        "attributes, attribute values, and other relevant information as "
+        "requested"
+    )
+    REQUIREMENTS = (
+        "in addition to providing accurate factually correct information, "
+        "it is critically important that you provide answer in a "
+        "format that is requested by the system, as answers will "
+        "be parsed by a machine. Your answer should end with a line that says "
+        "'The answer is ' and the chosen option"
+    )
+    INSTRUCTIONS = (
+        "Options that speculate about details not explicitly included in the"
+        "term meaning are to be avoided, e.g. term 'operation on abdominal "
+        "region' should not be assumed to be a laparoscopic operation, as "
+        "access method is not specified in the term. It is encouraged to "
+        "explain your reasoning when providing answers. The automated system "
+        "will look for the last answer surrounded by square brackets, e.g. "
+        "[answer], so only one of the options should be selected and returned "
+        "in this format. If the question looks like 'What is the topography of "
+        "the pulmonary tuberculosis?', and the options are [Lung structure], "
+        "[Heart structure], [Kidney structure], the good answer would look "
+        "like 'As the term 'pulmonary' refers to a disease of the lungs, "
+        "the topography should be [Lung structure].' If you are not sure about "
+        "the answer, you are encouraged to think aloud, analyzing the options."
+    )
+
+    ESCAPE_INSTRUCTIONS = (
+        "If all provided options are incorrect, or imply extra information "
+        "not present in the term, you must explain why each option is "
+        "incorrect, and finalize the answer with the word "
+        f"{EscapeHatch.WORD}."
+    )
+
+    def prompt_for_supertype(
+        self,
+        term: Term,
+        options: Iterable[Term],
+        allow_escape: bool = True,
+        term_context: str | None = None,
+        options_context: dict[Term, str] | None = None,
+    ) -> Term | EscapeHatch:
+        # Construct the prompt
+        prompt = ""
+        prompt += "You are " + self.ROLE + ".\n\n"
+        prompt += "Your assignment is " + self.TASK + ".\n\n"
+        prompt += "Please note that " + self.REQUIREMENTS + ".\n\n"
+        prompt += "Your exact instructions are:\n\n"
+        prompt += self.INSTRUCTIONS + (allow_escape * self.ESCAPE_INSTRUCTIONS)
+        prompt += "\n\n"
+
+        prompt += (
+            f"Given the term '{term}', what is the closest supertype "
+            "of it's meaning?"
+        )
+        if term_context:
+            prompt += " Following information is provided about the term: "
+            prompt += term_context
+
+        prompt += "\n\nOptions, in no particular order:\n"
+        for option in options:
+            prompt += f" - {self.wrap_term(option)}"
+            if options_context and option in options_context:
+                prompt += f": {options_context[option]}"
+            prompt += "\n"
+        # Remind of the escape hatch, just in case
+        if allow_escape:
+            prompt += f" - {EscapeHatch.WORD}: " "None of the above\n"
+
+        # Get the answer
+        while True:
+            print(prompt)
+            brain_answer = input("Answer: ").strip()
+            try:
+                return self.unwrap_class_answer(
+                    brain_answer,
+                    options,
+                    EscapeHatch.WORD if allow_escape else None,
+                )
+            except PrompterError as e:
+                print("Error:", e)
+                print("Please, provide an answer in the requested format.")
+
+    def prompt_for_attribute_presence(
+        self,
+        term: Term,
+        attribute: Term,
+        term_context: str | None = None,
+        attribute_context: str | None = None,
+    ) -> bool:
+        _ = term, attribute, term_context, attribute_context
+        raise NotImplementedError
+
+    def prompt_for_attribute_value(
+        self,
+        term: Term,
+        attribute: Term,
+        options: Iterable[Term],
+        term_context: str | None = None,
+        options_context: dict[Term, str] | None = None,
+        allow_escape: bool = True,
+    ) -> Term | EscapeHatch:
+        _ = (
+            term,
+            attribute,
+            options,
+            term_context,
+            options_context,
+            allow_escape,
+        )
+        raise NotImplementedError
 
 
 def get_version() -> str:
@@ -272,7 +466,7 @@ def get_mrcm_domain_reference_set_entries(
     step = 100
     collected_items = []
 
-    while offset < total:
+    while offset < total or total == 0:
         response = requests.get(
             url=SNOWSTORM_API + f"/{branch_path}/members",
             params={
@@ -296,18 +490,25 @@ def get_mrcm_domain_reference_set_entries(
 if __name__ == "__main__":
     print("Snowstorm Verson:" + get_version())
     branch = get_main_branch_path()
+
     print("Using branch path:", branch)
-
     branch_info = get_branch_info(branch)
-    # print("Branch Info:")
-    # print(json.dumps(branch_info, indent=2))
-
-    attribute_model_hierarchy = get_attribute_model_hierarchy(branch)
-    # print("Attribute Model Hierarchy:")
-    # print_attribute_model_hierarchy(attribute_model_hierarchy)
 
     print("MRCM Domain Reference Set entries:")
     domain_refset_entries = get_mrcm_domain_reference_set_entries(branch)
+    print("Total entries:", len(domain_refset_entries))
+
+    for entry in domain_refset_entries:
+        component = entry["referencedComponent"]
+        if SCTID(component["conceptId"]) not in WHITELISTED_SUPERTYPES:
+            continue
+        print(
+            f"For concept {component['conceptId']}"
+            + f"| {component['pt']['term']} |:"
+        )
+        print(bool(entry["additionalFields"]))
+        print()
+
     mrcm_entries = [
         MRCMDomainRefsetEntry.from_json(entry)
         for entry in domain_refset_entries
@@ -320,3 +521,11 @@ if __name__ == "__main__":
         print("    -", entry.domain_constraint)
         print("    -", entry.guide_link)
         print()
+
+    # Test
+    term = Term("Pyogenic liver abscess")
+    prompter = HumanPrompter()
+    supertypes = [Term(entry.term) for entry in mrcm_entries]
+    supertype = prompter.prompt_for_supertype(term, supertypes)
+
+    print("Selected supertype:", supertype)
