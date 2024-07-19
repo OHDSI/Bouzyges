@@ -41,7 +41,7 @@ class BooleanAnswer(str):
 ## Connection constants
 ### Snowstorm API
 SNOWSTORM_API = URL("http://localhost:8080/")
-TARGET_CODESYSTEM = "SNOMEDCT"
+
 
 ## Logic constants
 ### MRCM
@@ -59,7 +59,7 @@ NULL_ANSWER = EscapeHatch()
 ### SNOMED modelling
 @dataclass(frozen=True, slots=True)
 class AttributeRelationship:
-    """Represents a SNOMED CT attribute relationship."""
+    """Represents a SNOMED CT attribute-value pair relationship."""
 
     attribute: SCTID
     value: SCTID
@@ -495,105 +495,110 @@ TODO: Interface with a shock collar.
         raise NotImplementedError
 
 
-def get_version() -> str:
-    response = requests.get(
-        SNOWSTORM_API + "version", headers={"Accept": "application/json"}
-    )
-    if response.status_code != 200:
-        raise SnowstormRequestError.from_response(response)
-    return response.json()["version"]
+class SnowstormAPI:
+    TARGET_CODESYSTEM = "SNOMEDCT"
 
+    def __init__(self, url: URL = SNOWSTORM_API):
+        self.url = url
 
-def get_main_branch_path() -> BranchPath:
-    # Get codesystems and look for a target
-    response = requests.get(
-        SNOWSTORM_API + "codesystems", headers={"Accept": "application/json"}
-    )
-    if response.status_code != 200:
-        raise SnowstormRequestError.from_response(response)
-
-    for codesystem in response.json()["items"]:
-        if codesystem["shortName"] == TARGET_CODESYSTEM:
-            # TODO: double-check by module contents
-            return BranchPath(codesystem["branchPath"])
-
-    raise SnowstormAPIError(
-        f"Target codesystem {TARGET_CODESYSTEM} is not present on Snowstorm"
-    )
-
-
-def get_branch_info(branch_path: BranchPath) -> dict:
-    response = requests.get(
-        SNOWSTORM_API + f"branches/{branch_path}",
-        headers={"Accept": "application/json"},
-    )
-    if response.status_code != 200:
-        raise SnowstormRequestError.from_response(response)
-
-    return response.json()
-
-
-def get_attribute_model_hierarchy(branch_path: BranchPath) -> dict:
-    response = requests.get(
-        SNOWSTORM_API + f"mrcm/{branch_path}/concept-model-attribute-hierarchy",
-        headers={"Accept": "application/json"},
-    )
-    if response.status_code != 200:
-        raise SnowstormRequestError.from_response(response)
-
-    return response.json()
-
-
-def print_attribute_model_hierarchy(amh: dict) -> None:
-    def print_node(node, indent):
-        print("  " * indent, f"{node["conceptId"]}:", node["pt"]["term"])
-        for child in node.get("children", ()):
-            print_node(child, indent + 1)
-
-    print_node(amh, 0)
-
-
-def get_mrcm_domain_reference_set_entries(
-    branch_path: BranchPath,
-) -> list[dict]:
-    total = 0
-    offset = 0
-    step = 100
-    collected_items = []
-
-    while offset < total or total == 0:
+    def get_version(self) -> str:
         response = requests.get(
-            url=SNOWSTORM_API + f"/{branch_path}/members",
-            params={
-                "referenceSet": MRCM_DOMAIN_REFERENCE_SET_ECL,
-                "active": True,
-                "offset": offset,
-                "limit": step,
-            },
+            self.url + "version", headers={"Accept": "application/json"}
+        )
+        if response.status_code != 200:
+            raise SnowstormRequestError.from_response(response)
+        return response.json()["version"]
+
+    def get_main_branch_path(self) -> BranchPath:
+        # Get codesystems and look for a target
+        response = requests.get(
+            self.url + "codesystems", headers={"Accept": "application/json"}
+        )
+        if response.status_code != 200:
+            raise SnowstormRequestError.from_response(response)
+
+        for codesystem in response.json()["items"]:
+            if codesystem["shortName"] == self.TARGET_CODESYSTEM:
+                # TODO: double-check by module contents
+                return BranchPath(codesystem["branchPath"])
+
+        raise SnowstormAPIError(
+            f"Target codesystem {self.TARGET_CODESYSTEM} is not present"
+        )
+
+    def get_branch_info(self, branch_path: BranchPath) -> dict:
+        response = requests.get(
+            self.url + f"branches/{branch_path}",
             headers={"Accept": "application/json"},
         )
         if response.status_code != 200:
             raise SnowstormRequestError.from_response(response)
 
-        collected_items.extend(response.json()["items"])
-        total = response.json()["total"]
-        offset += step
+        return response.json()
 
-    return collected_items
+    def get_attribute_model_hierarchy(self, branch_path: BranchPath) -> dict:
+        response = requests.get(
+            self.url + f"mrcm/{branch_path}/concept-model-attribute-hierarchy",
+            headers={"Accept": "application/json"},
+        )
+        if response.status_code != 200:
+            raise SnowstormRequestError.from_response(response)
+
+        return response.json()
+
+    @staticmethod
+    def print_attribute_model_hierarchy(amh: dict) -> None:
+        def print_node(node, indent):
+            print("  " * indent, f"{node["conceptId"]}:", node["pt"]["term"])
+            for child in node.get("children", ()):
+                print_node(child, indent + 1)
+
+        print_node(amh, 0)
+
+    def get_mrcm_domain_reference_set_entries(
+        self,
+        branch_path: BranchPath,
+    ) -> list[dict]:
+        total = 0
+        offset = 0
+        step = 100
+        collected_items = []
+
+        while offset < total or total == 0:
+            response = requests.get(
+                url=self.url + f"/{branch_path}/members",
+                params={
+                    "referenceSet": MRCM_DOMAIN_REFERENCE_SET_ECL,
+                    "active": True,
+                    "offset": offset,
+                    "limit": step,
+                },
+                headers={"Accept": "application/json"},
+            )
+            if response.status_code != 200:
+                raise SnowstormRequestError.from_response(response)
+
+            collected_items.extend(response.json()["items"])
+            total = response.json()["total"]
+            offset += step
+
+        return collected_items
 
 
 if __name__ == "__main__":
-    print("Snowstorm Verson:" + get_version())
-    branch = get_main_branch_path()
+    snowstorm = SnowstormAPI()
+
+    print("Snowstorm Verson:" + snowstorm.get_version())
+    branch = snowstorm.get_main_branch_path()
 
     print("Using branch path:", branch)
-    branch_info = get_branch_info(branch)
+    branch_info = snowstorm.get_branch_info(branch)
 
     print("MRCM Domain Reference Set entries:")
-    domain_refset_entries = get_mrcm_domain_reference_set_entries(branch)
-    print("Total entries:", len(domain_refset_entries))
+    domain_entries = snowstorm.get_mrcm_domain_reference_set_entries(branch)
+    print("Total entries:", len(domain_entries))
 
-    for entry in domain_refset_entries:
+    for entry in domain_entries:
         component = entry["referencedComponent"]
         if SCTID(component["conceptId"]) not in WHITELISTED_SUPERTYPES:
             continue
@@ -606,7 +611,7 @@ if __name__ == "__main__":
 
     mrcm_entries = [
         MRCMDomainRefsetEntry.from_json(entry)
-        for entry in domain_refset_entries
+        for entry in domain_entries
         if SCTID(entry["referencedComponent"]["conceptId"])
         in WHITELISTED_SUPERTYPES
     ]
@@ -631,6 +636,8 @@ if __name__ == "__main__":
         case Term(term):
             supertype = supertypes[term]
         case _:
-            raise ValueError("Should not happen!")
+            raise ValueError(
+                "Should not happen: did the prompter inject the escape hatch?"
+            )
 
     print("Selected supertype:", supertype)
