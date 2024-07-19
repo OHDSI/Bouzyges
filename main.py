@@ -8,30 +8,44 @@ import json
 # Boilerplate
 ## Typing
 class BranchPath(str):
-    pass
+    """Snowstorm working branch"""
 
 
 class SCTID(int):
-    pass
+    """SNOMED CT identifier"""
 
 
 class Term(str):
-    pass
+    """Any of valid SNOMED CT descriptions
+
+    Prefer PT for LLMs and FSN for humans.
+    """
 
 
 class ECLExpression(str):
-    pass
+    """Expression Constraint Language expression"""
 
 
 class URL(str):
-    pass
+    """REST URL string"""
 
 
 class EscapeHatch(object):
+    """\
+"Escape hatch" sentinel type for prompters
+
+Escape hatch is provided to an LLM agent to be able to choose nothing rather
+than hallucinating an answer. Will have just one singleton instance.
+"""
+
     WORD: Term = Term("[NONE]")
 
 
 class BooleanAnswer(str):
+    """\
+Boolean answer constants for prompters for yes/no questions
+"""
+
     YES = Term("[AYE]")
     NO = Term("[NAY]")
 
@@ -48,6 +62,7 @@ SNOWSTORM_API = URL("http://localhost:8080/")
 ### MRCM
 MRCM_DOMAIN_REFERENCE_SET_ECL = ECLExpression("<<723589008")
 WHITELISTED_SUPERTYPES: set[SCTID] = {
+    # Only limit to well-modeled supertypes for now
     SCTID(404684003),  # Clinical finding
     SCTID(71388002),  # Procedure
 }
