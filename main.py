@@ -242,8 +242,8 @@ Default verbose prompt format for the LLM agent.
         "in addition to providing accurate factually correct information, "
         "it is critically important that you provide answer in a "
         "format that is requested by the system, as answers will "
-        "be parsed by a machine. Your answer should end with a line that says "
-        "'The answer is ' and the chosen option"
+        "be parsed by a machine. Your answer should ALWAYS end with a line "
+        "that says 'The answer is ' and the chosen option"
     )
     INSTRUCTIONS = (
         "Options that speculate about details not explicitly included in the"
@@ -262,7 +262,7 @@ Default verbose prompt format for the LLM agent.
     )
 
     ESCAPE_INSTRUCTIONS = (
-        "If all provided options are incorrect, or imply extra information "
+        " If all provided options are incorrect, or imply extra information "
         "not present in the term, you must explain why each option is "
         "incorrect, and finalize the answer with the word "
         f"{EscapeHatch.WORD}."
@@ -286,8 +286,8 @@ Default verbose prompt format for the LLM agent.
         prompt += "\n\n"
 
         prompt += (
-            f"Given the term '{term}', what is the closest supertype "
-            "of it's meaning?"
+            f"Given the term '{term}', what is the closest supertype or exact "
+            "equivalent of it's meaning from the following options?"
         )
         if term_context:
             prompt += " Following information is provided about the term: "
@@ -310,6 +310,10 @@ class Prompter(ABC):
     """\
 Interfaces prompts to the LLM agent and parses answers.
 """
+
+    def __init__(self, *args, prompt_format: PromptFormat, **kwargs):
+        _ = args, kwargs
+        self.prompt_format = prompt_format
 
     def unwrap_class_answer(
         self,
@@ -447,7 +451,7 @@ TODO: Interface with a shock collar.
         options_context: dict[Term, str] | None = None,
     ) -> Term | EscapeHatch:
         # Construct the prompt
-        prompt = DefaultPromptFormat.form_supertype(
+        prompt = self.prompt_format.form_supertype(
             term, options, allow_escape, term_context, options_context
         )
 
@@ -624,7 +628,8 @@ if __name__ == "__main__":
 
     # Test
     portrait = SemanticPortrait("Pyogenic liver abscess")
-    prompter = HumanPrompter()
+    format = DefaultPromptFormat()
+    prompter = HumanPrompter(prompt_format=format)
     supertypes = {entry.term: entry.sctid for entry in mrcm_entries}
     supertype = prompter.prompt_supertype(
         term=portrait.source_term,
