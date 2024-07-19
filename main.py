@@ -372,6 +372,17 @@ Default verbose prompt format for the LLM agent.
     )
 
     @classmethod
+    def _form_shared_header(cls, allow_escape) -> str:
+        prompt = ""
+        prompt += "You are " + cls.ROLE + ".\n\n"
+        prompt += "Your assignment is " + cls.TASK + ".\n\n"
+        prompt += "Please note that " + cls.REQUIREMENTS + ".\n\n"
+        prompt += "Your exact instructions are:\n\n"
+        prompt += cls.INSTRUCTIONS + (allow_escape * cls.ESCAPE_INSTRUCTIONS)
+        prompt += "\n\n"
+        return prompt
+
+    @classmethod
     def form_supertype(
         cls,
         term: str,
@@ -380,13 +391,7 @@ Default verbose prompt format for the LLM agent.
         term_context: str | None = None,
         options_context: dict[Term, str] | None = None,
     ) -> str:
-        prompt = ""
-        prompt += "You are " + cls.ROLE + ".\n\n"
-        prompt += "Your assignment is " + cls.TASK + ".\n\n"
-        prompt += "Please note that " + cls.REQUIREMENTS + ".\n\n"
-        prompt += "Your exact instructions are:\n\n"
-        prompt += cls.INSTRUCTIONS + (allow_escape * cls.ESCAPE_INSTRUCTIONS)
-        prompt += "\n\n"
+        prompt = cls._form_shared_header(allow_escape)
 
         prompt += (
             f"Given the term '{term}', what is the closest supertype or exact "
@@ -405,6 +410,32 @@ Default verbose prompt format for the LLM agent.
         # Remind of the escape hatch, just in case
         if allow_escape:
             prompt += f" - {EscapeHatch.WORD}: " "None of the above\n"
+        return prompt
+
+    @classmethod
+    def form_attr_presence(
+        cls,
+        term: str,
+        attribute: Term,
+        term_context: str | None = None,
+        attribute_context: str | None = None,
+    ) -> str:
+        prompt = cls._form_shared_header(allow_escape=False)
+        prompt += (
+            f"Is the attribute '{attribute}' present in the term '{term}'?"
+        )
+        if term_context:
+            prompt += " Following information is provided about the term: "
+            prompt += term_context
+        if attribute_context:
+            prompt += " Attribute is defined as follows: "
+            prompt += attribute_context
+
+        prompt += "\n\n"
+        prompt += f"""Options are:
+ - {BooleanAnswer.YES}: The attribute is guaranteed present.
+ - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
+"""
         return prompt
 
 
