@@ -2,6 +2,7 @@ import requests
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from typing import Iterable
+import json
 
 
 # Boilerplate
@@ -115,6 +116,92 @@ more useful information for domain modelling, but it is not yet well explored.
         )
 
 
+# Solving for presence vs. absence of attributes is way, way easier than solving
+# quantitative problems. For now, Cardinality will likely be ignored.
+@dataclass(frozen=True, slots=True)
+class Cardinality:
+    """\
+Represents a cardinality of an attribute in a group or a definition.
+"""
+
+    min: int
+    max: None | int
+
+
+@dataclass(frozen=True, slots=True)
+class AttributeDomain:
+    """\
+Represents a domain of applications of an attribute.
+"""
+
+    sctid: SCTID
+    pt: Term
+    domain_id: SCTID
+    grouped: bool
+    cardinality: Cardinality
+    in_group_cardinality: Cardinality
+
+
+@dataclass(frozen=True, slots=True)
+class AttributeRange:
+    """\
+Represents a range of values of an attribute.
+"""
+
+    sctid: SCTID
+    pt: Term
+    range_constraint: ECLExpression
+    attribute_rule: ECLExpression
+
+
+@dataclass(frozen=True, slots=True)
+class AttributeConstraints:
+    """\
+Represents information about an attribute obtained from a known set of parent 
+concepts.
+"""
+
+    sctid: SCTID
+    pt: Term
+    attributeDomain: Iterable[AttributeDomain]
+    # May actually not be required
+    # because /mrcm/{branch}/attribute-values/ exists
+    attributeRange: Iterable[AttributeRange]
+
+    @classmethod
+    def from_json(cls, json_data: dict):
+        return cls(
+            sctid=SCTID(json_data["conceptId"]),
+            pt=Term(json_data["pt"]["term"]),
+            attributeDomain=[
+                AttributeDomain(
+                    sctid=SCTID(json_data["conceptId"]),
+                    pt=Term(json_data["pt"]["term"]),
+                    domain_id=SCTID(ad["domainId"]),
+                    grouped=ad["grouped"],
+                    cardinality=Cardinality(
+                        ad["attributeCardinality"]["min"],
+                        ad["attributeCardinality"].get("max"),
+                    ),
+                    in_group_cardinality=Cardinality(
+                        ad["attributeInGroupCardinality"]["min"],
+                        ad["attributeInGroupCardinality"].get("max"),
+                    ),
+                )
+                for ad in json_data["attributeDomain"]
+            ],
+            attributeRange=[
+                AttributeRange(
+                    sctid=SCTID(json_data["conceptId"]),
+                    pt=Term(json_data["pt"]["term"]),
+                    range_constraint=ECLExpression(ar["rangeConstraint"]),
+                    attribute_rule=ECLExpression(ar["attributeRule"]),
+                )
+                for ar in json_data["attributeRange"]
+            ],
+        )
+
+
 ### Mutable portrait
 @dataclass
 class SemanticPortrait:
@@ -142,6 +229,7 @@ class SnowstormRequestError(SnowstormAPIError):
 
     @classmethod
     def from_response(cls, response):
+        print(json.dumps(response.json(), indent=2))
         return cls(
             f"Snowstorm API returned {response.status_code} status code",
             response,
@@ -503,13 +591,14 @@ class SnowstormAPI:
     TARGET_CODESYSTEM = "SNOMEDCT"
 
     def __init__(self, url: URL = SNOWSTORM_API):
-        self.url = url
+        self.url: URL = url
+        self.branch_path: BranchPath = self.get_main_branch_path()
 
     def get_version(self) -> str:
         response = requests.get(
             self.url + "version", headers={"Accept": "application/json"}
         )
-        if response.status_code != 200:
+        if not response.ok:
             raise SnowstormRequestError.from_response(response)
         return response.json()["version"]
 
@@ -518,7 +607,7 @@ class SnowstormAPI:
         response = requests.get(
             self.url + "codesystems", headers={"Accept": "application/json"}
         )
-        if response.status_code != 200:
+        if not response.ok:
             raise SnowstormRequestError.from_response(response)
 
         for codesystem in response.json()["items"]:
@@ -530,25 +619,38 @@ class SnowstormAPI:
             f"Target codesystem {self.TARGET_CODESYSTEM} is not present"
         )
 
-    def get_branch_info(self, branch_path: BranchPath) -> dict:
+    def get_branch_info(self) -> dict:
         response = requests.get(
-            self.url + f"branches/{branch_path}",
+            self.url + f"branches/{self.branch_path}",
             headers={"Accept": "application/json"},
         )
-        if response.status_code != 200:
+        if not response.ok:
             raise SnowstormRequestError.from_response(response)
 
         return response.json()
 
-    def get_attribute_model_hierarchy(self, branch_path: BranchPath) -> dict:
+    def get_attribute_suggestions(
+        self, parent_ids: Iterable[SCTID]
+    ) -> list[AttributeConstraints]:
+        params = {
+            "parentIds": [*parent_ids],
+            "proximalPrimitiveModeling": True,  # Maybe?
+            # Filter post-coordination for now
+            "contentType": "NEW_PRECOORDINATED",
+        }
+
         response = requests.get(
-            self.url + f"mrcm/{branch_path}/concept-model-attribute-hierarchy",
+            url=self.url + "mrcm/" + self.branch_path + "/domain-attributes",
+            params=params,
             headers={"Accept": "application/json"},
         )
-        if response.status_code != 200:
+        if not response.ok:
             raise SnowstormRequestError.from_response(response)
 
-        return response.json()
+        return [
+            AttributeConstraints.from_json(attr)
+            for attr in response.json()["items"]
+        ]
 
     @staticmethod
     def print_attribute_model_hierarchy(amh: dict) -> None:
@@ -561,7 +663,6 @@ class SnowstormAPI:
 
     def get_mrcm_domain_reference_set_entries(
         self,
-        branch_path: BranchPath,
     ) -> list[dict]:
         total = 0
         offset = 0
@@ -570,7 +671,7 @@ class SnowstormAPI:
 
         while offset < total or total == 0:
             response = requests.get(
-                url=self.url + f"/{branch_path}/members",
+                url=self.url + f"/{self.branch_path}/members",
                 params={
                     "referenceSet": MRCM_DOMAIN_REFERENCE_SET_ECL,
                     "active": True,
@@ -579,7 +680,7 @@ class SnowstormAPI:
                 },
                 headers={"Accept": "application/json"},
             )
-            if response.status_code != 200:
+            if not response.ok:
                 raise SnowstormRequestError.from_response(response)
 
             collected_items.extend(response.json()["items"])
@@ -593,25 +694,11 @@ if __name__ == "__main__":
     snowstorm = SnowstormAPI()
 
     print("Snowstorm Verson:" + snowstorm.get_version())
-    branch = snowstorm.get_main_branch_path()
-
-    print("Using branch path:", branch)
-    branch_info = snowstorm.get_branch_info(branch)
+    print("Using branch path:", snowstorm.branch_path)
 
     print("MRCM Domain Reference Set entries:")
-    domain_entries = snowstorm.get_mrcm_domain_reference_set_entries(branch)
+    domain_entries = snowstorm.get_mrcm_domain_reference_set_entries()
     print("Total entries:", len(domain_entries))
-
-    for entry in domain_entries:
-        component = entry["referencedComponent"]
-        if SCTID(component["conceptId"]) not in WHITELISTED_SUPERTYPES:
-            continue
-        print(
-            f"For concept {component['conceptId']}"
-            + f"| {component['pt']['term']} |:"
-        )
-        print(bool(entry["additionalFields"]))
-        print()
 
     mrcm_entries = [
         MRCMDomainRefsetEntry.from_json(entry)
@@ -646,3 +733,10 @@ if __name__ == "__main__":
             )
 
     print("Selected supertype:", supertype)
+    attributes = snowstorm.get_attribute_suggestions([supertype])
+    for attribute in attributes:
+        print(" -", attribute.sctid, attribute.pt)
+        for dom in attribute.attributeDomain:
+            print("    - Domain is:", dom.domain_id)
+        for rng in attribute.attributeRange:
+            print("    - Range is:", rng.attribute_rule)
