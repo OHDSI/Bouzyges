@@ -225,7 +225,10 @@ Represents an interactively built semantic portrait of a source concept."""
         self.source_term: str = term
         self.context: Iterable[str] | None = context
         self.ancestor_anchors: set[SCTID] = set()
+
+        self.unchecked_attributes: set[SCTID] = set()
         self.attributes: dict[SCTID, SCTID] = {}
+        self.rejected_attributes: set[SCTID] = set()
 
 
 ## Exceptions
@@ -441,10 +444,6 @@ class OpenAIPromptFormat(PromptFormat):
     """\
 Default prompt format for the OpenAI API.
 """
-
-    def __init__(self, *args, **kwargs):
-        _ = args, kwargs
-        raise NotImplementedError
 
 
 ## Logic prompter classes
@@ -664,7 +663,21 @@ A prompter that interfaces with the OpenAI API using Azure.
             azure_endpoint=azure_endpoint,
             api_version=api_version or self.DEFAULT_VERSION,
         )
+        self._endpoint = azure_endpoint
         self._model = model or self.DEFAULT_MODEL
+
+    def ping(self) -> bool:
+        """\
+Check if the API is available.
+"""
+        print("Pinging the Azure API...")
+        try:
+            response = requests.get(self._endpoint, timeout=5)
+        except requests.ConnectTimeout:
+            print("Connection timed out")
+            return False
+        print("Response:", response.status_code)
+        return response.ok
 
     def prompt_supertype(
         self,
@@ -810,6 +823,99 @@ class SnowstormAPI:
         return collected_items
 
 
+# Main logic host
+class Bouzyges:
+    """\
+    Main logic host for the Bouzyges system.
+    """
+
+    def __init__(
+        self,
+        snowstorm: SnowstormAPI,
+        prompter: Prompter,
+        terms: Iterable[str],
+        contexts: Iterable[str] | None = None,
+    ):
+        self.snowstorm = snowstorm
+        self.prompter = prompter
+        self.portraits = {}
+        if contexts is None:
+            self.portraits = {term: SemanticPortrait(term) for term in terms}
+        else:
+            self.portraits = {
+                term: SemanticPortrait(term, context)
+                for term, context in zip(terms, contexts)
+            }
+
+        # Load MRCM entries
+        self.mrcm_entries = [
+            MRCMDomainRefsetEntry.from_json(entry)
+            for entry in domain_entries
+            if SCTID(entry["referencedComponent"]["conceptId"])
+            in WHITELISTED_SUPERTYPES
+        ]
+
+        for entry in self.mrcm_entries:
+            print(" -", entry.term + ":")
+            print("    -", entry.domain_constraint)
+            print("    -", entry.guide_link)
+            print()
+
+        # Initialize supertypes
+        self.initialize_supertypes()
+
+    def initialize_supertypes(self):
+        """\
+Initialize supertypes for all terms to start building portraits.
+"""
+        for source_term, portrait in self.portraits.items():
+            if portrait.ancestor_anchors:
+                raise ValueError(
+                    "Should not happen: ancestor anchors are set, "
+                    "and yet initialize_supertypes is called"
+                )
+
+            supertypes_decode = {
+                entry.term: entry.sctid for entry in self.mrcm_entries
+            }
+            supertype_term = prompter.prompt_supertype(
+                term=portrait.source_term,
+                options=supertypes_decode,
+                allow_escape=False,
+                term_context="; ".join(portrait.context)
+                if portrait.context
+                else None,
+            )
+            match supertype_term:
+                case Term(answer_term):
+                    supertype = supertypes_decode[answer_term]
+                    print("Assuming", source_term, "is", answer_term)
+                    portrait.ancestor_anchors.add(supertype)
+                case _:
+                    raise ValueError(
+                        "Should not happen: "
+                        "did the prompter inject the escape hatch?"
+                    )
+
+    def populate_attribute_candidates(self) -> None:
+        for term, portrait in self.portraits.items():
+            print("Possible attributes for:", term)
+            attributes = self.snowstorm.get_attribute_suggestions(
+                portrait.ancestor_anchors
+            )
+            for attribute in attributes:
+                if attribute.sctid in portrait.rejected_attributes:
+                    continue
+                elif attribute.sctid not in portrait.attributes:
+                    portrait.unchecked_attributes.add(attribute.sctid)
+
+                print(" -", attribute.sctid, attribute.pt)
+                for dom in attribute.attributeDomain:
+                    print("    - Domain is:", dom.domain_id)
+                for rng in attribute.attributeRange:
+                    print("    - Range is:", rng.attribute_rule)
+
+
 if __name__ == "__main__":
     # Load environment variables for API access
     dotenv.load_dotenv()
@@ -826,22 +932,6 @@ if __name__ == "__main__":
     domain_entries = snowstorm.get_mrcm_domain_reference_set_entries()
     print("Total entries:", len(domain_entries))
 
-    mrcm_entries = [
-        MRCMDomainRefsetEntry.from_json(entry)
-        for entry in domain_entries
-        if SCTID(entry["referencedComponent"]["conceptId"])
-        in WHITELISTED_SUPERTYPES
-    ]
-
-    for entry in mrcm_entries:
-        print(" -", entry.term + ":")
-        print("    -", entry.domain_constraint)
-        print("    -", entry.guide_link)
-        print()
-
-    # Test
-    portrait = SemanticPortrait("Pyogenic liver abscess")
-
     # If API key exists in the environment, use it
     prompter: Prompter
     api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -853,30 +943,21 @@ if __name__ == "__main__":
             azure_endpoint=api_endpoint,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
         )
+
+        if not prompter.ping():
+            print("Azure API is not available, using human prompter.")
+            prompter = HumanPrompter(prompt_format=DefaultPromptFormat())
     else:
         print("No Azure API key found, using human prompter.")
         prompter = HumanPrompter(prompt_format=DefaultPromptFormat())
 
-    supertypes = {entry.term: entry.sctid for entry in mrcm_entries}
-    supertype = prompter.prompt_supertype(
-        term=portrait.source_term,
-        options=supertypes.keys(),
-        allow_escape=False,
-        term_context="; ".join(portrait.context) if portrait.context else None,
-    )
-    match supertype:
-        case Term(term):
-            supertype = supertypes[term]
-        case _:
-            raise ValueError(
-                "Should not happen: did the prompter inject the escape hatch?"
-            )
+    # Test
+    term = "Pyogenic liver abscess"
 
-    print("Selected supertype:", supertype)
-    attributes = snowstorm.get_attribute_suggestions([supertype])
-    for attribute in attributes:
-        print(" -", attribute.sctid, attribute.pt)
-        for dom in attribute.attributeDomain:
-            print("    - Domain is:", dom.domain_id)
-        for rng in attribute.attributeRange:
-            print("    - Range is:", rng.attribute_rule)
+    bouzyges = Bouzyges(
+        snowstorm=snowstorm,
+        prompter=prompter,
+        terms=[term],
+    )
+
+    bouzyges.populate_attribute_candidates()
