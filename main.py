@@ -1,8 +1,11 @@
+import dotenv
+import json
+import openai
+import os
 import requests
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
 from typing import Iterable
-import json
 
 
 # Boilerplate
@@ -51,11 +54,6 @@ Boolean answer constants for prompters for yes/no questions
 
     def __new__(cls, value: bool):
         return cls.YES if value else cls.NO
-
-
-## Connection constants
-### Snowstorm API
-SNOWSTORM_API = URL("http://localhost:8080/")
 
 
 ## Logic constants
@@ -439,6 +437,16 @@ Default verbose prompt format for the LLM agent.
         return prompt
 
 
+class OpenAIPromptFormat(PromptFormat):
+    """\
+Default prompt format for the OpenAI API.
+"""
+
+    def __init__(self, *args, **kwargs):
+        _ = args, kwargs
+        raise NotImplementedError
+
+
 ## Logic prompter classes
 class Prompter(ABC):
     """\
@@ -633,10 +641,76 @@ TODO: Interface with a shock collar.
         raise NotImplementedError
 
 
+class OpenAIAzurePrompter(Prompter):
+    """\
+A prompter that interfaces with the OpenAI API using Azure.
+"""
+
+    DEFAULT_MODEL = "gpt-35-turbo"
+    DEFAULT_VERSION = "2023-07-01-preview"
+
+    def __init__(
+        self,
+        *args,
+        api_key: str,
+        azure_endpoint: str,
+        api_version: str | None = None,
+        model: str | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._client = openai.AzureOpenAI(
+            api_key=api_key,
+            azure_endpoint=azure_endpoint,
+            api_version=api_version or self.DEFAULT_VERSION,
+        )
+        self._model = model or self.DEFAULT_MODEL
+
+    def prompt_supertype(
+        self,
+        term: str,
+        options: Iterable[Term],
+        allow_escape: bool = True,
+        term_context: str | None = None,
+        options_context: dict[Term, str] | None = None,
+    ) -> Term | EscapeHatch:
+        _ = term, options, allow_escape, term_context, options_context
+        raise NotImplementedError
+
+    def prompt_attr_presence(
+        self,
+        term: str,
+        attribute: Term,
+        term_context: str | None = None,
+        attribute_context: str | None = None,
+    ) -> bool:
+        _ = term, attribute, term_context, attribute_context
+        raise NotImplementedError
+
+    def prompt_attr_value(
+        self,
+        term: str,
+        attribute: Term,
+        options: Iterable[Term],
+        term_context: str | None = None,
+        options_context: dict[Term, str] | None = None,
+        allow_escape: bool = True,
+    ) -> Term | EscapeHatch:
+        _ = (
+            term,
+            attribute,
+            options,
+            term_context,
+            options_context,
+            allow_escape,
+        )
+        raise NotImplementedError
+
+
 class SnowstormAPI:
     TARGET_CODESYSTEM = "SNOMEDCT"
 
-    def __init__(self, url: URL = SNOWSTORM_API):
+    def __init__(self, url: URL):
         self.url: URL = url
         self.branch_path: BranchPath = self.get_main_branch_path()
 
@@ -737,7 +811,13 @@ class SnowstormAPI:
 
 
 if __name__ == "__main__":
-    snowstorm = SnowstormAPI()
+    # Load environment variables for API access
+    dotenv.load_dotenv()
+
+    snowstorm_endpoint = os.getenv("SNOWSTORM_ENDPOINT")
+    if not snowstorm_endpoint:
+        raise ValueError("SNOWSTORM_ENDPOINT environment variable is not set")
+    snowstorm = SnowstormAPI(URL(snowstorm_endpoint))
 
     print("Snowstorm Verson:" + snowstorm.get_version())
     print("Using branch path:", snowstorm.branch_path)
@@ -761,8 +841,22 @@ if __name__ == "__main__":
 
     # Test
     portrait = SemanticPortrait("Pyogenic liver abscess")
-    format = DefaultPromptFormat()
-    prompter = HumanPrompter(prompt_format=format)
+
+    # If API key exists in the environment, use it
+    prompter: Prompter
+    api_key = os.getenv("AZURE_OPENAI_API_KEY")
+    api_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+    if api_key is not None and api_endpoint is not None:
+        prompter = OpenAIAzurePrompter(
+            prompt_format=OpenAIPromptFormat(),
+            api_key=api_key,
+            azure_endpoint=api_endpoint,
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+        )
+    else:
+        print("No Azure API key found, using human prompter.")
+        prompter = HumanPrompter(prompt_format=DefaultPromptFormat())
+
     supertypes = {entry.term: entry.sctid for entry in mrcm_entries}
     supertype = prompter.prompt_supertype(
         term=portrait.source_term,
