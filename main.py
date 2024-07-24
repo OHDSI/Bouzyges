@@ -18,7 +18,7 @@ class SCTID(int):
     """SNOMED CT identifier"""
 
 
-class Term(str):
+class SCTDescription(str):
     """Any of valid SNOMED CT descriptions
 
     Prefer PT for LLMs and FSN for humans.
@@ -41,7 +41,7 @@ Escape hatch is provided to an LLM agent to be able to choose nothing rather
 than hallucinating an answer. Will have just one singleton instance.
 """
 
-    WORD: Term = Term("[NONE]")
+    WORD: SCTDescription = SCTDescription("[NONE]")
 
 
 class BooleanAnswer(str):
@@ -49,8 +49,8 @@ class BooleanAnswer(str):
 Boolean answer constants for prompters for yes/no questions
 """
 
-    YES = Term("[AYE]")
-    NO = Term("[NAY]")
+    YES = SCTDescription("[AYE]")
+    NO = SCTDescription("[NAY]")
 
     def __new__(cls, value: bool):
         return cls.YES if value else cls.NO
@@ -98,7 +98,7 @@ more useful information for domain modelling, but it is not yet well explored.
 
     # Concept properties
     sctid: SCTID
-    term: Term
+    term: SCTDescription
 
     # Additional fields
     domain_constraint: ECLExpression
@@ -117,7 +117,7 @@ more useful information for domain modelling, but it is not yet well explored.
 
         return cls(
             sctid=SCTID(json_data["referencedComponent"]["conceptId"]),
-            term=Term(json_data["referencedComponent"]["pt"]["term"]),
+            term=SCTDescription(json_data["referencedComponent"]["pt"]["term"]),
             domain_template=ECLExpression(
                 # Use pre-coordination: stricter
                 af["domainTemplateForPrecoordination"]
@@ -148,7 +148,7 @@ Represents a domain of applications of an attribute.
 """
 
     sctid: SCTID
-    pt: Term
+    pt: SCTDescription
     domain_id: SCTID
     grouped: bool
     cardinality: Cardinality
@@ -162,7 +162,7 @@ Represents a range of values of an attribute.
 """
 
     sctid: SCTID
-    pt: Term
+    pt: SCTDescription
     range_constraint: ECLExpression
     attribute_rule: ECLExpression
 
@@ -175,7 +175,7 @@ concepts.
 """
 
     sctid: SCTID
-    pt: Term
+    pt: SCTDescription
     attributeDomain: Iterable[AttributeDomain]
     # May actually not be required
     # because /mrcm/{branch}/attribute-values/ exists
@@ -185,11 +185,11 @@ concepts.
     def from_json(cls, json_data: dict):
         return cls(
             sctid=SCTID(json_data["conceptId"]),
-            pt=Term(json_data["pt"]["term"]),
+            pt=SCTDescription(json_data["pt"]["term"]),
             attributeDomain=[
                 AttributeDomain(
                     sctid=SCTID(json_data["conceptId"]),
-                    pt=Term(json_data["pt"]["term"]),
+                    pt=SCTDescription(json_data["pt"]["term"]),
                     domain_id=SCTID(ad["domainId"]),
                     grouped=ad["grouped"],
                     cardinality=Cardinality(
@@ -206,7 +206,7 @@ concepts.
             attributeRange=[
                 AttributeRange(
                     sctid=SCTID(json_data["conceptId"]),
-                    pt=Term(json_data["pt"]["term"]),
+                    pt=SCTDescription(json_data["pt"]["term"]),
                     range_constraint=ECLExpression(ar["rangeConstraint"]),
                     attribute_rule=ECLExpression(ar["attributeRule"]),
                 )
@@ -278,10 +278,10 @@ Abstract class for formatting prompts for the LLM agent.
     def form_supertype(
         cls,
         term: str,
-        options: Iterable[Term],
+        options: Iterable[SCTDescription],
         allow_escape: bool = True,
         term_context: str | None = None,
-        options_context: dict[Term, str] | None = None,
+        options_context: dict[SCTDescription, str] | None = None,
     ) -> str:
         """\
 Format a prompt for the LLM agent to choose the best matching proximal ancestor
@@ -294,12 +294,13 @@ for a term.
     def form_attr_presence(
         cls,
         term: str,
-        attribute: Term,
+        attribute: SCTDescription,
         term_context: str | None = None,
         attribute_context: str | None = None,
     ) -> str:
         """\
-Format a prompt for the LLM agent to decide if an attribute is present in a term.
+Format a prompt for the LLM agent to decide if an attribute is present in a
+term.
 """
         _ = term, attribute, term_context, attribute_context
         raise NotImplementedError
@@ -308,10 +309,10 @@ Format a prompt for the LLM agent to decide if an attribute is present in a term
     def form_attr_value(
         cls,
         term: str,
-        attribute: Term,
-        options: Iterable[Term],
+        attribute: SCTDescription,
+        options: Iterable[SCTDescription],
         term_context: str | None = None,
-        options_context: dict[Term, str] | None = None,
+        options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
     ) -> str:
         """\
@@ -387,10 +388,10 @@ Default verbose prompt format for the LLM agent.
     def form_supertype(
         cls,
         term: str,
-        options: Iterable[Term],
+        options: Iterable[SCTDescription],
         allow_escape: bool = True,
         term_context: str | None = None,
-        options_context: dict[Term, str] | None = None,
+        options_context: dict[SCTDescription, str] | None = None,
     ) -> str:
         prompt = cls._form_shared_header(allow_escape)
 
@@ -417,7 +418,7 @@ Default verbose prompt format for the LLM agent.
     def form_attr_presence(
         cls,
         term: str,
-        attribute: Term,
+        attribute: SCTDescription,
         term_context: str | None = None,
         attribute_context: str | None = None,
     ) -> str:
@@ -459,9 +460,9 @@ Interfaces prompts to the LLM agent and parses answers.
     def unwrap_class_answer(
         self,
         answer: str,
-        options: Iterable[Term] = (),
-        escape_hatch: Term | None = EscapeHatch.WORD,
-    ) -> Term | EscapeHatch:
+        options: Iterable[SCTDescription] = (),
+        escape_hatch: SCTDescription | None = EscapeHatch.WORD,
+    ) -> SCTDescription | EscapeHatch:
         """\
 Check if answer has exactly one valid option.
 
@@ -474,7 +475,7 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
             if answer.count("[") == answer.count("]") == 1:
                 start = answer.index("[") + 1
                 end = answer.index("]")
-                return Term(answer[start:end])
+                return SCTDescription(answer[start:end])
             else:
                 raise PrompterError(
                     "Could not find a unique option in the answer:", answer
@@ -499,13 +500,13 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
             for option, count in counts.items():
                 if count:
                     return (
-                        Term(option[1:-1])
+                        SCTDescription(option[1:-1])
                         if option != escape_hatch
                         else NULL_ANSWER
                     )
 
         # Return the last encountered option in brackets
-        indices: dict[Term | EscapeHatch, int] = {
+        indices: dict[SCTDescription | EscapeHatch, int] = {
             option: answer.rfind(wrapped)
             for wrapped, option in wrapped_options.items()
         }
@@ -540,11 +541,11 @@ Check if the answer contains a yes or no option.
     def prompt_supertype(
         self,
         term: str,
-        options: Iterable[Term],
+        options: Iterable[SCTDescription],
         allow_escape: bool = True,
         term_context: str | None = None,
-        options_context: dict[Term, str] | None = None,
-    ) -> Term | EscapeHatch:
+        options_context: dict[SCTDescription, str] | None = None,
+    ) -> SCTDescription | EscapeHatch:
         """\
 Prompt the model to choose the best matching proximal ancestor for a term.
 """
@@ -553,7 +554,7 @@ Prompt the model to choose the best matching proximal ancestor for a term.
     def prompt_attr_presence(
         self,
         term: str,
-        attribute: Term,
+        attribute: SCTDescription,
         term_context: str | None = None,
         attribute_context: str | None = None,
     ) -> bool:
@@ -565,12 +566,12 @@ Prompt the model to decide if an attribute is present in a term.
     def prompt_attr_value(
         self,
         term: str,
-        attribute: Term,
-        options: Iterable[Term],
+        attribute: SCTDescription,
+        options: Iterable[SCTDescription],
         term_context: str | None = None,
-        options_context: dict[Term, str] | None = None,
+        options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
-    ) -> Term | EscapeHatch:
+    ) -> SCTDescription | EscapeHatch:
         """\
 Prompt the model to choose the value of an attribute in a term.
 """
@@ -586,11 +587,11 @@ TODO: Interface with a shock collar.
     def prompt_supertype(
         self,
         term: str,
-        options: Iterable[Term],
+        options: Iterable[SCTDescription],
         allow_escape: bool = True,
         term_context: str | None = None,
-        options_context: dict[Term, str] | None = None,
-    ) -> Term | EscapeHatch:
+        options_context: dict[SCTDescription, str] | None = None,
+    ) -> SCTDescription | EscapeHatch:
         # Construct the prompt
         prompt = self.prompt_format.form_supertype(
             term, options, allow_escape, term_context, options_context
@@ -613,7 +614,7 @@ TODO: Interface with a shock collar.
     def prompt_attr_presence(
         self,
         term: str,
-        attribute: Term,
+        attribute: SCTDescription,
         term_context: str | None = None,
         attribute_context: str | None = None,
     ) -> bool:
@@ -623,12 +624,12 @@ TODO: Interface with a shock collar.
     def prompt_attr_value(
         self,
         term: str,
-        attribute: Term,
-        options: Iterable[Term],
+        attribute: SCTDescription,
+        options: Iterable[SCTDescription],
         term_context: str | None = None,
-        options_context: dict[Term, str] | None = None,
+        options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
-    ) -> Term | EscapeHatch:
+    ) -> SCTDescription | EscapeHatch:
         _ = (
             term,
             attribute,
@@ -682,18 +683,18 @@ Check if the API is available.
     def prompt_supertype(
         self,
         term: str,
-        options: Iterable[Term],
+        options: Iterable[SCTDescription],
         allow_escape: bool = True,
         term_context: str | None = None,
-        options_context: dict[Term, str] | None = None,
-    ) -> Term | EscapeHatch:
+        options_context: dict[SCTDescription, str] | None = None,
+    ) -> SCTDescription | EscapeHatch:
         _ = term, options, allow_escape, term_context, options_context
         raise NotImplementedError
 
     def prompt_attr_presence(
         self,
         term: str,
-        attribute: Term,
+        attribute: SCTDescription,
         term_context: str | None = None,
         attribute_context: str | None = None,
     ) -> bool:
@@ -703,12 +704,12 @@ Check if the API is available.
     def prompt_attr_value(
         self,
         term: str,
-        attribute: Term,
-        options: Iterable[Term],
+        attribute: SCTDescription,
+        options: Iterable[SCTDescription],
         term_context: str | None = None,
-        options_context: dict[Term, str] | None = None,
+        options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
-    ) -> Term | EscapeHatch:
+    ) -> SCTDescription | EscapeHatch:
         _ = (
             term,
             attribute,
@@ -833,6 +834,7 @@ class Bouzyges:
         self,
         snowstorm: SnowstormAPI,
         prompter: Prompter,
+        mrcm_entry_points: Iterable[MRCMDomainRefsetEntry],
         terms: Iterable[str],
         contexts: Iterable[str] | None = None,
     ):
@@ -848,12 +850,7 @@ class Bouzyges:
             }
 
         # Load MRCM entries
-        self.mrcm_entries = [
-            MRCMDomainRefsetEntry.from_json(entry)
-            for entry in domain_entries
-            if SCTID(entry["referencedComponent"]["conceptId"])
-            in WHITELISTED_SUPERTYPES
-        ]
+        self.mrcm_entries = mrcm_entry_points
 
         for entry in self.mrcm_entries:
             print(" -", entry.term + ":")
@@ -887,7 +884,7 @@ Initialize supertypes for all terms to start building portraits.
                 else None,
             )
             match supertype_term:
-                case Term(answer_term):
+                case SCTDescription(answer_term):
                     supertype = supertypes_decode[answer_term]
                     print("Assuming", source_term, "is", answer_term)
                     portrait.ancestor_anchors.add(supertype)
@@ -931,6 +928,12 @@ if __name__ == "__main__":
     print("MRCM Domain Reference Set entries:")
     domain_entries = snowstorm.get_mrcm_domain_reference_set_entries()
     print("Total entries:", len(domain_entries))
+    domain_entry_points = [
+        MRCMDomainRefsetEntry.from_json(entry)
+        for entry in domain_entries
+        if SCTID(entry["referencedComponent"]["conceptId"])
+        in WHITELISTED_SUPERTYPES
+    ]
 
     # If API key exists in the environment, use it
     prompter: Prompter
@@ -957,6 +960,7 @@ if __name__ == "__main__":
     bouzyges = Bouzyges(
         snowstorm=snowstorm,
         prompter=prompter,
+        mrcm_entry_points=domain_entry_points,
         terms=[term],
     )
 
