@@ -3,6 +3,7 @@ import enum
 import json
 import openai
 import os
+import re
 import requests
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -939,6 +940,75 @@ class SnowstormAPI:
 
         return collected_items
 
+    @staticmethod
+    def _range_constraint_to_parents(rc: ECLExpression) -> set[SCTID]:
+        """\
+This is an extremely naive implementation that assumes that the range constraint
+is always a disjunction of parent SCTIDs
+
+As I am not expecting to have to parse ECL anywhere else now, this will have to
+do
+"""
+        # TODO: Hook up to the ECL parser
+
+        # Check the assumption; if it fails, raise an error
+        SUBSUMPTION = "<< "
+        SCTID_ = r"(?P<sctid>\d{6,}) "  # Intentional capture group
+        TERM_ = r"\|(.+?) \([a-z]+(?: [a-z]+)*\)\|"
+        subsumption_constraint = re.compile(SUBSUMPTION + SCTID_ + TERM_)
+
+        parents: set[SCTID] = set()
+        failure = False
+        for part in rc.split(" OR "):
+            if not subsumption_constraint.fullmatch(part):
+                failure = True
+
+            if matched := subsumption_constraint.match(part):
+                parents.add(SCTID(matched.group("sctid")))
+            else:
+                failure = True
+
+            if failure:
+                print(f"{rc} is not a simple disjunction of SCTIDs!")
+                raise NotImplementedError
+
+        return parents
+
+    def get_attribute_values(
+        self, ancestors: Iterable[SCTID], attribute: SCTID
+    ) -> set[SCTID]:
+        # First, obtain the range constraints
+        params = {
+            "parentIds": [*ancestors],
+            "proximalPrimitiveModeling": True,  # Maybe?
+            "contentType": "NEW_PRECOORDINATED",
+        }
+
+        response = requests.get(
+            url=self.url + "mrcm/" + self.branch_path + "/domain-attributes",
+            params=params,
+            headers={"Accept": "application/json"},
+        )
+
+        if not response.ok:
+            raise SnowstormRequestError.from_response(response)
+
+        # Find the attribute in the response
+        for attr in response.json()["items"]:
+            if attr["conceptId"] == attribute:
+                attribute_data = attr
+                break
+        else:
+            # Attribute has no valid range for selected ancestors
+            return set()
+
+        constraint = ECLExpression(
+            attribute_data["rangeConstraint"][0]["attributeRange"]
+        )
+
+        values: set[SCTID] = self._range_constraint_to_parents(constraint)
+        return values
+
 
 # Main logic host
 class Bouzyges:
@@ -1027,6 +1097,23 @@ Initialize supertypes for all terms to start building portraits.
                     print("    - Domain is:", dom.domain_id)
                 for rng in attribute.attributeRange:
                     print("    - Range is:", rng.attribute_rule)
+
+    def populate_unchecked_attributes(self) -> None:
+        for portrait in self.portraits.values():
+            for attribute in portrait.unchecked_attributes:
+                # Get possible attribute values
+                values_options = self.snowstorm.get_attribute_values(
+                    ancestors=portrait.ancestor_anchors,
+                    attribute=attribute,
+                )
+
+                if not values_options:
+                    portrait.rejected_attributes.add(attribute)
+                    portrait.unchecked_attributes.remove(attribute)
+                    continue
+                else:
+                    # TODO: Prompt to choose the value
+                    raise NotImplementedError
 
 
 if __name__ == "__main__":
