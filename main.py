@@ -1,10 +1,12 @@
 import dotenv
+import enum
 import json
 import openai
 import os
 import requests
-from dataclasses import dataclass
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from frozendict import frozendict
 from typing import Iterable
 
 
@@ -221,6 +223,14 @@ class SemanticPortrait:
     """\
 Represents an interactively built semantic portrait of a source concept."""
 
+    class State(enum.Enum):
+        # Completed state
+        COMPLETED: int  # Ready for use
+        # Incomplete states
+        MISSING_SUPERTYPES: int  # No supertypes selected
+        MISSING_ATTRIBUTES: int  # No attributes selected
+        MISSING_ATTRIBUTE_VALUES: int  # Not all attributes have values
+
     def __init__(self, term: str, context: str | None = None) -> None:
         self.source_term: str = term
         self.context: Iterable[str] | None = context
@@ -229,6 +239,21 @@ Represents an interactively built semantic portrait of a source concept."""
         self.unchecked_attributes: set[SCTID] = set()
         self.attributes: dict[SCTID, SCTID] = {}
         self.rejected_attributes: set[SCTID] = set()
+
+        self.state = self.State.MISSING_SUPERTYPES
+
+    def update_state(self) -> None:
+        if not self.ancestor_anchors:
+            self.state = self.State.MISSING_SUPERTYPES
+        elif not any(self.rejected_attributes) and not any(self.attributes):
+            self.state = self.State.MISSING_ATTRIBUTES
+        elif self.unchecked_attributes:
+            self.state = self.State.MISSING_ATTRIBUTE_VALUES
+        else:
+            # Portrait does not know if it or it's
+            # attributes have unresolved subtypes;
+            # It will report as completed
+            self.state = self.State.COMPLETED
 
 
 ## Exceptions
@@ -254,6 +279,21 @@ class SnowstormRequestError(SnowstormAPIError):
 
 class PrompterError(Exception):
     """Raised when the prompter encounters an error."""
+
+
+## Prompt class
+@dataclass(frozen=True, slots=True)
+class Prompt:
+    """\
+Represents a prompt for the LLM agent to answer.
+
+Has option to store API parameters for the answer.
+"""
+
+    prompt_message: str
+    options: frozenset[SCTDescription] | None = None
+    escape_hatch: SCTDescription | None = None
+    api_options: frozendict[str, str | int | float | bool] | None = None
 
 
 # Logic classes
@@ -282,7 +322,7 @@ Abstract class for formatting prompts for the LLM agent.
         allow_escape: bool = True,
         term_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
-    ) -> str:
+    ) -> Prompt:
         """\
 Format a prompt for the LLM agent to choose the best matching proximal ancestor
 for a term.
@@ -297,7 +337,7 @@ for a term.
         attribute: SCTDescription,
         term_context: str | None = None,
         attribute_context: str | None = None,
-    ) -> str:
+    ) -> Prompt:
         """\
 Format a prompt for the LLM agent to decide if an attribute is present in a
 term.
@@ -312,9 +352,10 @@ term.
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
         term_context: str | None = None,
+        attribute_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
-    ) -> str:
+    ) -> Prompt:
         """\
 Format a prompt for the LLM agent to choose the value of an attribute in a term.
 """
@@ -323,6 +364,7 @@ Format a prompt for the LLM agent to choose the value of an attribute in a term.
             attribute,
             options,
             term_context,
+            attribute_context,
             options_context,
             allow_escape,
         )
@@ -331,7 +373,9 @@ Format a prompt for the LLM agent to choose the value of an attribute in a term.
 
 class DefaultPromptFormat(PromptFormat):
     """\
-Default verbose prompt format for the LLM agent.
+Default simple verbose prompt format for the LLM agent.
+
+Contains no API options, intended for human prompters.
     """
 
     ROLE = (
@@ -392,7 +436,7 @@ Default verbose prompt format for the LLM agent.
         allow_escape: bool = True,
         term_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
-    ) -> str:
+    ) -> Prompt:
         prompt = cls._form_shared_header(allow_escape)
 
         prompt += (
@@ -412,7 +456,11 @@ Default verbose prompt format for the LLM agent.
         # Remind of the escape hatch, just in case
         if allow_escape:
             prompt += f" - {EscapeHatch.WORD}: " "None of the above\n"
-        return prompt
+        return Prompt(
+            prompt,
+            frozenset(options),
+            EscapeHatch.WORD if allow_escape else None,
+        )
 
     @classmethod
     def form_attr_presence(
@@ -421,7 +469,7 @@ Default verbose prompt format for the LLM agent.
         attribute: SCTDescription,
         term_context: str | None = None,
         attribute_context: str | None = None,
-    ) -> str:
+    ) -> Prompt:
         prompt = cls._form_shared_header(allow_escape=False)
         prompt += (
             f"Is the attribute '{attribute}' present in the term '{term}'?"
@@ -438,7 +486,40 @@ Default verbose prompt format for the LLM agent.
  - {BooleanAnswer.YES}: The attribute is guaranteed present.
  - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
 """
-        return prompt
+        return Prompt(prompt, frozenset((BooleanAnswer.YES, BooleanAnswer.NO)))
+
+    @classmethod
+    def form_attr_value(
+        cls,
+        term: str,
+        attribute: SCTDescription,
+        options: Iterable[SCTDescription],
+        term_context: str | None = None,
+        attribute_context: str | None = None,
+        options_context: dict[SCTDescription, str] | None = None,
+        allow_escape: bool = True,
+    ) -> Prompt:
+        prompt = cls._form_shared_header(allow_escape=allow_escape)
+        prompt += (
+            f"Choose the value of the attribute '{attribute}' in the term "
+            f"'{term}'."
+        )
+        if term_context:
+            prompt += " Following information is provided about the term: "
+            prompt += term_context
+        if attribute_context:
+            prompt += " Attribute is defined as follows: "
+            prompt += attribute_context
+
+        prompt += "\n\nOptions, in no particular order:\n"
+        for option in options:
+            prompt += f" - {cls.wrap_term(option)}"
+            if options_context and option in options_context:
+                prompt += f": {options_context[option]}"
+            prompt += "\n"
+        # Remind of the escape hatch, just in case
+        prompt += f" - {EscapeHatch.WORD}: " "None of the above\n"
+        return Prompt(prompt, frozenset(options), EscapeHatch.WORD)
 
 
 class OpenAIPromptFormat(PromptFormat):
@@ -569,11 +650,18 @@ Prompt the model to decide if an attribute is present in a term.
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
         term_context: str | None = None,
+        attribute_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
     ) -> SCTDescription | EscapeHatch:
         """\
 Prompt the model to choose the value of an attribute in a term.
+"""
+
+    @abstractmethod
+    def ping(self) -> bool:
+        """\
+Check if the API is available.
 """
 
 
@@ -593,13 +681,13 @@ TODO: Interface with a shock collar.
         options_context: dict[SCTDescription, str] | None = None,
     ) -> SCTDescription | EscapeHatch:
         # Construct the prompt
-        prompt = self.prompt_format.form_supertype(
+        prompt: Prompt = self.prompt_format.form_supertype(
             term, options, allow_escape, term_context, options_context
         )
 
         # Get the answer
         while True:
-            print(prompt)
+            print(prompt.prompt_message)
             brain_answer = input("Answer: ").strip()
             try:
                 return self.unwrap_class_answer(
@@ -618,8 +706,18 @@ TODO: Interface with a shock collar.
         term_context: str | None = None,
         attribute_context: str | None = None,
     ) -> bool:
-        _ = term, attribute, term_context, attribute_context
-        raise NotImplementedError
+        prompt: Prompt = self.prompt_format.form_attr_presence(
+            term, attribute, term_context, attribute_context
+        )
+
+        while True:
+            print(prompt.prompt_message)
+            brain_answer = input("Answer: ").strip()
+            try:
+                return self.unwrap_bool_answer(brain_answer)
+            except PrompterError as e:
+                print("Error:", e)
+                print("Please, provide an answer in the requested format.")
 
     def prompt_attr_value(
         self,
@@ -627,18 +725,37 @@ TODO: Interface with a shock collar.
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
         term_context: str | None = None,
+        attribute_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
     ) -> SCTDescription | EscapeHatch:
-        _ = (
+        prompt: Prompt = self.prompt_format.form_attr_value(
             term,
             attribute,
             options,
             term_context,
+            attribute_context,
             options_context,
             allow_escape,
         )
-        raise NotImplementedError
+
+        while True:
+            print(prompt.prompt_message)
+            brain_answer = input("Answer: ").strip()
+            try:
+                return self.unwrap_class_answer(
+                    brain_answer,
+                    options,
+                    EscapeHatch.WORD if allow_escape else None,
+                )
+            except PrompterError as e:
+                print("Error:", e)
+                print("Please, provide an answer in the requested format.")
+
+    def ping(self) -> bool:
+        input("Hey, are you here? (Press Enter) ")
+        print("Good human.")
+        return True
 
 
 class OpenAIAzurePrompter(Prompter):
@@ -668,9 +785,6 @@ A prompter that interfaces with the OpenAI API using Azure.
         self._model = model or self.DEFAULT_MODEL
 
     def ping(self) -> bool:
-        """\
-Check if the API is available.
-"""
         print("Pinging the Azure API...")
         try:
             response = requests.get(self._endpoint, timeout=5)
@@ -707,6 +821,7 @@ Check if the API is available.
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
         term_context: str | None = None,
+        attribute_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
     ) -> SCTDescription | EscapeHatch:
@@ -715,6 +830,7 @@ Check if the API is available.
             attribute,
             options,
             term_context,
+            attribute_context,
             options_context,
             allow_escape,
         )
