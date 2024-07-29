@@ -226,11 +226,11 @@ Represents an interactively built semantic portrait of a source concept."""
 
     class State(enum.Enum):
         # Completed state
-        COMPLETED: int  # Ready for use
+        COMPLETED = 0  # Ready for use
         # Incomplete states
-        MISSING_SUPERTYPES: int  # No supertypes selected
-        MISSING_ATTRIBUTES: int  # No attributes selected
-        MISSING_ATTRIBUTE_VALUES: int  # Not all attributes have values
+        MISSING_SUPERTYPES = 1  # No supertypes selected
+        MISSING_ATTRIBUTES = 2  # No attributes selected
+        MISSING_ATTRIBUTE_VALUES = 3  # Not all attributes have values
 
     def __init__(self, term: str, context: str | None = None) -> None:
         self.source_term: str = term
@@ -941,7 +941,9 @@ class SnowstormAPI:
         return collected_items
 
     @staticmethod
-    def _range_constraint_to_parents(rc: ECLExpression) -> set[SCTID]:
+    def _range_constraint_to_parents(
+        rc: ECLExpression,
+    ) -> dict[SCTID, SCTDescription]:
         """\
 This is an extremely naive implementation that assumes that the range constraint
 is always a disjunction of parent SCTIDs
@@ -954,17 +956,19 @@ do
         # Check the assumption; if it fails, raise an error
         SUBSUMPTION = "<< "
         SCTID_ = r"(?P<sctid>\d{6,}) "  # Intentional capture group
-        TERM_ = r"\|(.+?) \([a-z]+(?: [a-z]+)*\)\|"
+        TERM_ = r"\|(?P<term>.+?) \([a-z]+(?: [a-z]+)*\)\|"
         subsumption_constraint = re.compile(SUBSUMPTION + SCTID_ + TERM_)
 
-        parents: set[SCTID] = set()
+        parents: dict[SCTID, SCTDescription] = {}
         failure = False
         for part in rc.split(" OR "):
             if not subsumption_constraint.fullmatch(part):
                 failure = True
 
             if matched := subsumption_constraint.match(part):
-                parents.add(SCTID(matched.group("sctid")))
+                parents[SCTID(matched.group("sctid"))] = SCTDescription(
+                    matched.group("term")
+                )
             else:
                 failure = True
 
@@ -976,7 +980,7 @@ do
 
     def get_attribute_values(
         self, ancestors: Iterable[SCTID], attribute: SCTID
-    ) -> set[SCTID]:
+    ) -> dict[SCTID, SCTDescription]:
         # First, obtain the range constraints
         params = {
             "parentIds": [*ancestors],
@@ -995,19 +999,34 @@ do
 
         # Find the attribute in the response
         for attr in response.json()["items"]:
-            if attr["conceptId"] == attribute:
+            if SCTID(attr["conceptId"]) == attribute:
                 attribute_data = attr
                 break
         else:
             # Attribute has no valid range for selected ancestors
-            return set()
+            return {}
+
+        print("Attribute data:")
+        print(json.dumps(attribute_data, indent=2))
 
         constraint = ECLExpression(
-            attribute_data["rangeConstraint"][0]["attributeRange"]
+            attribute_data["attributeRange"][0]["rangeConstraint"]
         )
 
-        values: set[SCTID] = self._range_constraint_to_parents(constraint)
+        values: dict[SCTID, SCTDescription] = self._range_constraint_to_parents(
+            constraint
+        )
         return values
+
+    def get_pt(self, id: SCTID) -> SCTDescription:
+        response = requests.get(
+            url=self.url + f"concepts/{id}",
+            headers={"Accept": "application/json"},
+        )
+        if not response.ok:
+            raise SnowstormRequestError.from_response(response)
+
+        return SCTDescription(response.json()["pt"]["term"])
 
 
 # Main logic host
@@ -1086,34 +1105,81 @@ Initialize supertypes for all terms to start building portraits.
             attributes = self.snowstorm.get_attribute_suggestions(
                 portrait.ancestor_anchors
             )
-            for attribute in attributes:
-                if attribute.sctid in portrait.rejected_attributes:
-                    continue
-                elif attribute.sctid not in portrait.attributes:
-                    portrait.unchecked_attributes.add(attribute.sctid)
 
-                print(" -", attribute.sctid, attribute.pt)
-                for dom in attribute.attributeDomain:
-                    print("    - Domain is:", dom.domain_id)
-                for rng in attribute.attributeRange:
-                    print("    - Range is:", rng.attribute_rule)
+            # Remove previously rejected attributes
+            attributes = [
+                attribute
+                for attribute in attributes
+                if attribute.sctid not in portrait.rejected_attributes
+            ]
+
+            # Confirm the attributes
+            for attribute in attributes:
+                accept = self.prompter.prompt_attr_presence(
+                    term=portrait.source_term,
+                    attribute=attribute.pt,
+                    term_context="; ".join(portrait.context)
+                    if portrait.context
+                    else None,
+                )
+                print(
+                    " -",
+                    attribute.sctid,
+                    attribute.pt + ":",
+                    "Present" if accept else "Not present",
+                )
+
+                if accept:
+                    portrait.unchecked_attributes.add(attribute.sctid)
 
     def populate_unchecked_attributes(self) -> None:
         for portrait in self.portraits.values():
+            rejected = set()
             for attribute in portrait.unchecked_attributes:
                 # Get possible attribute values
                 values_options = self.snowstorm.get_attribute_values(
                     ancestors=portrait.ancestor_anchors,
                     attribute=attribute,
                 )
+                print("Attribute:", attribute)
+                print("Values:", values_options)
 
                 if not values_options:
-                    portrait.rejected_attributes.add(attribute)
-                    portrait.unchecked_attributes.remove(attribute)
+                    # No valid values for this attribute and parent combination
+                    rejected.add(attribute)
                     continue
                 else:
-                    # TODO: Prompt to choose the value
-                    raise NotImplementedError
+                    print("Possible values for:", attribute)
+                    for value in values_options:
+                        print(" -", value)
+
+                # Prompt for the value
+                value_term = self.prompter.prompt_attr_value(
+                    term=portrait.source_term,
+                    attribute=snowstorm.get_pt(attribute),
+                    options=values_options.values(),
+                    term_context="; ".join(portrait.context)
+                    if portrait.context
+                    else None,
+                    allow_escape=True,
+                )
+
+                match value_term:
+                    case SCTDescription(answer_term):
+                        sctid = next(
+                            SCTID(sctid)
+                            for sctid, term in values_options.items()
+                            if term == answer_term
+                        )
+                        portrait.attributes[attribute] = sctid
+                    case EscapeHatch.WORD:
+                        # Choosing no attribute on initial prompt
+                        # means rejection
+                        rejected.add(attribute)
+
+            portrait.rejected_attributes |= rejected
+            # All are seen by now
+            portrait.unchecked_attributes = set()
 
 
 if __name__ == "__main__":
@@ -1168,3 +1234,4 @@ if __name__ == "__main__":
     )
 
     bouzyges.populate_attribute_candidates()
+    bouzyges.populate_unchecked_attributes()
