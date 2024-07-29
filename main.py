@@ -304,6 +304,45 @@ class PromptFormat(ABC):
 Abstract class for formatting prompts for the LLM agent.
 """
 
+    ROLE = (
+        "a domain expert in clinical terminology who is helping to build a "
+        "semantic portrait of a concept in a clinical terminology system"
+    )
+    TASK = (
+        "to provide information about the given term supertypes, "
+        "attributes, attribute values, and other relevant information as "
+        "requested"
+    )
+    REQUIREMENTS = (
+        "in addition to providing accurate factually correct information, "
+        "it is critically important that you provide answer in a "
+        "format that is requested by the system, as answers will "
+        "be parsed by a machine. Your answer should ALWAYS end with a line "
+        "that says 'The answer is ' and the chosen option"
+    )
+    INSTRUCTIONS = (
+        "Options that speculate about details not explicitly included in the"
+        "term meaning are to be avoided, e.g. term 'operation on abdominal "
+        "region' should not be assumed to be a laparoscopic operation, as "
+        "access method is not specified in the term. It is encouraged to "
+        "explain your reasoning when providing answers. The automated system "
+        "will look for the last answer surrounded by square brackets, e.g. "
+        "[answer], so only one of the options should be selected and returned "
+        "in this format. If the question looks like 'What is the topography of "
+        "the pulmonary tuberculosis?', and the options are [Lung structure], "
+        "[Heart structure], [Kidney structure], the good answer would look "
+        "like 'As the term 'pulmonary' refers to a disease of the lungs, "
+        "the topography should be [Lung structure].' If you are not sure about "
+        "the answer, you are encouraged to think aloud, analyzing the options."
+    )
+
+    ESCAPE_INSTRUCTIONS = (
+        " If all provided options are incorrect, or imply extra information "
+        "not present in the term, you must explain why each option is "
+        "incorrect, and finalize the answer with the word "
+        f"{EscapeHatch.WORD}."
+    )
+
     ROLE: str
     TASK: str
     REQUIREMENTS: str
@@ -378,45 +417,6 @@ Default simple verbose prompt format for the LLM agent.
 
 Contains no API options, intended for human prompters.
     """
-
-    ROLE = (
-        "a domain expert in clinical terminology who is helping to build a "
-        "semantic portrait of a concept in a clinical terminology system"
-    )
-    TASK = (
-        "to provide information about the given term supertypes, "
-        "attributes, attribute values, and other relevant information as "
-        "requested"
-    )
-    REQUIREMENTS = (
-        "in addition to providing accurate factually correct information, "
-        "it is critically important that you provide answer in a "
-        "format that is requested by the system, as answers will "
-        "be parsed by a machine. Your answer should ALWAYS end with a line "
-        "that says 'The answer is ' and the chosen option"
-    )
-    INSTRUCTIONS = (
-        "Options that speculate about details not explicitly included in the"
-        "term meaning are to be avoided, e.g. term 'operation on abdominal "
-        "region' should not be assumed to be a laparoscopic operation, as "
-        "access method is not specified in the term. It is encouraged to "
-        "explain your reasoning when providing answers. The automated system "
-        "will look for the last answer surrounded by square brackets, e.g. "
-        "[answer], so only one of the options should be selected and returned "
-        "in this format. If the question looks like 'What is the topography of "
-        "the pulmonary tuberculosis?', and the options are [Lung structure], "
-        "[Heart structure], [Kidney structure], the good answer would look "
-        "like 'As the term 'pulmonary' refers to a disease of the lungs, "
-        "the topography should be [Lung structure].' If you are not sure about "
-        "the answer, you are encouraged to think aloud, analyzing the options."
-    )
-
-    ESCAPE_INSTRUCTIONS = (
-        " If all provided options are incorrect, or imply extra information "
-        "not present in the term, you must explain why each option is "
-        "incorrect, and finalize the answer with the word "
-        f"{EscapeHatch.WORD}."
-    )
 
     @classmethod
     def _form_shared_header(cls, allow_escape) -> str:
