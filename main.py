@@ -5,6 +5,7 @@ import openai
 import os
 import re
 import requests
+import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from frozendict import frozendict
@@ -298,6 +299,74 @@ Has option to store API parameters for the answer.
 
 
 # Logic classes
+## Prompt cache interface
+class PromptCache:
+    """\
+Interface for a prompt cache.
+
+Saves prompts and answers to avoid re-prompting the same questions and wasting
+tokens.
+"""
+
+    def __init__(self, db_connection: sqlite3.Connection):
+        self.connection = db_connection
+        self.table_name = "prompt"
+
+    def get(self, model: str, prompt: Prompt) -> str | None:
+        """\
+Get the answer from the cache for specified model.
+"""
+        query = f"""
+            SELECT response
+            FROM {self.table_name}
+            WHERE
+                model = ? AND
+                prompt = ? AND
+                api_options
+        """
+        if prompt.api_options:
+            api_options = json.dumps(
+                {
+                    key: prompt.api_options[key]
+                    for key in sorted(prompt.api_options)
+                }
+            )
+            query += " = ? ;"
+        else:
+            api_options = None
+            query += " is ? ;"
+        cursor = self.connection.cursor()
+        cursor.execute(
+            query,
+            (model, prompt.prompt_message, api_options),
+        )
+        return cursor.fetchone()
+
+    def remember(self, model: str, prompt: Prompt, response: str) -> None:
+        """\
+Remember the answer for the prompt for the specified model.
+"""
+        query = f"""
+            INSERT INTO {self.table_name} (model, prompt, response, api_options)
+            VALUES (?, ?, ?, ?)
+        """
+        if prompt.api_options:
+            api_options = json.dumps(
+                {
+                    key: prompt.api_options[key]
+                    for key in sorted(prompt.api_options)
+                }
+            )
+        else:
+            api_options = None
+        cursor = self.connection.cursor()
+        cursor.execute(
+            query,
+            (model, prompt.prompt_message, response, api_options),
+        )
+        self.connection.commit()
+
+
 ## Logic prompt format classes
 class PromptFormat(ABC):
     """\
@@ -535,9 +604,18 @@ class Prompter(ABC):
 Interfaces prompts to the LLM agent and parses answers.
 """
 
-    def __init__(self, *args, prompt_format: PromptFormat, **kwargs):
+    def __init__(
+        self,
+        *args,
+        prompt_format: PromptFormat,
+        use_cache: bool = True,
+        **kwargs,
+    ):
         _ = args, kwargs
         self.prompt_format = prompt_format
+        self.cache: sqlite3.Connection | None = None
+        if use_cache:
+            self.cache = sqlite3.connect("prompt_cache.db")
 
     def unwrap_class_answer(
         self,

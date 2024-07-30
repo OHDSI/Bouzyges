@@ -1,4 +1,10 @@
 # Taken from https://github.com/github/gitignore/blob/main/Python.gitignore
+
+# SQLite database files
+*.sqlite3
+*.sqlite3-journal
+*.db
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -59,8 +65,6 @@ cover/
 # Django stuff:
 *.log
 local_settings.py
-db.sqlite3
-db.sqlite3-journal
 
 # Flask stuff:
 instance/
