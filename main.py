@@ -480,7 +480,7 @@ Format a prompt for the LLM agent to choose the value of an attribute in a term.
         raise NotImplementedError
 
 
-class DefaultPromptFormat(PromptFormat):
+class VerbosePromptFormat(PromptFormat):
     """\
 Default simple verbose prompt format for the LLM agent.
 
@@ -592,17 +592,13 @@ Contains no API options, intended for human prompters.
         return Prompt(prompt, frozenset(options), EscapeHatch.WORD)
 
 
-class OpenAIPromptFormat(PromptFormat):
-    """\
-Default prompt format for the OpenAI API.
-"""
-
-
 ## Logic prompter classes
 class Prompter(ABC):
     """\
 Interfaces prompts to the LLM agent and parses answers.
 """
+
+    _model_id: str
 
     def __init__(
         self,
@@ -628,17 +624,17 @@ Check if answer has exactly one valid option.
 
 Assumes that the answer is a valid option if it is wrapped in brackets.
 """
-        answer = answer.strip().splitlines()[-1]
+        last_line = answer.strip().splitlines()[-1]
 
         if not options:
             # Return the answer in brackets, if there is one
-            if answer.count("[") == answer.count("]") == 1:
-                start = answer.index("[") + 1
-                end = answer.index("]")
-                return SCTDescription(answer[start:end])
+            if last_line.count("[") == last_line.count("]") == 1:
+                start = last_line.index("[") + 1
+                end = last_line.index("]")
+                return SCTDescription(last_line[start:end])
             else:
                 raise PrompterError(
-                    "Could not find a unique option in the answer:", answer
+                    "Could not find a unique option in the answer:", last_line
                 )
 
         wrapped_options = {
@@ -653,7 +649,7 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
 
         counts = {}
         for option in wrapped_options:
-            counts[option] = answer.count(option)
+            counts[option] = last_line.count(option)
 
         # Check if there is exactly one option present
         if sum(map(bool, counts.values())) == 1:
@@ -667,12 +663,12 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
 
         # Return the last encountered option in brackets
         indices: dict[SCTDescription | EscapeHatch, int] = {
-            option: answer.rfind(wrapped)
+            option: last_line.rfind(wrapped)
             for wrapped, option in wrapped_options.items()
         }
         if all(index == -1 for index in indices.values()):
             raise PrompterError(
-                "Could not find a unique option in the answer:", answer
+                "Could not find a unique option in the answer:", last_line
             )
 
         return max(indices, key=lambda k: indices.get(k, -1))
@@ -743,6 +739,10 @@ Prompt the model to choose the value of an attribute in a term.
 Check if the API is available.
 """
 
+    def cache_remember(self, prompt: Prompt, answer: str) -> None:
+        if self.cache:
+            self.cache.remember(self._model_id, prompt, answer)
+
 
 class HumanPrompter(Prompter):
     """\
@@ -750,6 +750,8 @@ A test prompter that interacts with a meatbag to get answers.
 
 TODO: Interface with a shock collar.
 """
+
+    _model_id = "human"
 
     def prompt_supertype(
         self,
@@ -764,16 +766,29 @@ TODO: Interface with a shock collar.
             term, options, allow_escape, term_context, options_context
         )
 
+        # Try the cache
+        if self.cache:
+            cached_answer = self.cache.get(self._model_id, prompt)
+            if cached_answer:
+                return self.unwrap_class_answer(
+                    cached_answer,
+                    options,
+                    EscapeHatch.WORD if allow_escape else None,
+                )
+
         # Get the answer
         while True:
             print(prompt.prompt_message)
             brain_answer = input("Answer: ").strip()
             try:
-                return self.unwrap_class_answer(
+                answer = self.unwrap_class_answer(
                     brain_answer,
                     options,
                     EscapeHatch.WORD if allow_escape else None,
                 )
+                self.cache_remember(prompt, brain_answer)
+                return answer
+
             except PrompterError as e:
                 print("Error:", e)
                 print("Please, provide an answer in the requested format.")
@@ -789,11 +804,18 @@ TODO: Interface with a shock collar.
             term, attribute, term_context, attribute_context
         )
 
+        if self.cache:
+            cached_answer = self.cache.get(self._model_id, prompt)
+            if cached_answer:
+                return self.unwrap_bool_answer(cached_answer)
+
         while True:
             print(prompt.prompt_message)
             brain_answer = input("Answer: ").strip()
             try:
-                return self.unwrap_bool_answer(brain_answer)
+                answer = self.unwrap_bool_answer(brain_answer)
+                self.cache_remember(prompt, brain_answer)
+                return answer
             except PrompterError as e:
                 print("Error:", e)
                 print("Please, provide an answer in the requested format.")
@@ -818,15 +840,27 @@ TODO: Interface with a shock collar.
             allow_escape,
         )
 
+        if self.cache:
+            cached_answer = self.cache.get(self._model_id, prompt)
+            if cached_answer:
+                return self.unwrap_class_answer(
+                    cached_answer,
+                    options,
+                    EscapeHatch.WORD if allow_escape else None,
+                )
+
         while True:
             print(prompt.prompt_message)
             brain_answer = input("Answer: ").strip()
             try:
-                return self.unwrap_class_answer(
+                answer = self.unwrap_class_answer(
                     brain_answer,
                     options,
                     EscapeHatch.WORD if allow_escape else None,
                 )
+                self.cache_remember(prompt, brain_answer)
+                return answer
+
             except PrompterError as e:
                 print("Error:", e)
                 print("Please, provide an answer in the requested format.")
@@ -863,7 +897,7 @@ A prompter that interfaces with the OpenAI API using Azure.
             api_version=api_version or self.DEFAULT_VERSION,
         )
         self._endpoint = azure_endpoint
-        self._model = model or self.DEFAULT_MODEL
+        self._model_id = model or self.DEFAULT_MODEL
 
     def ping(self) -> bool:
         print("Pinging the Azure API...")
@@ -878,9 +912,9 @@ A prompter that interfaces with the OpenAI API using Azure.
         success = response.get("data", []) != []
         if success:
             print("API is available")
-            if self._model not in [obj["id"] for obj in response["data"]]:
+            if self._model_id not in [obj["id"] for obj in response["data"]]:
                 print(
-                    f"But '{self._model}' is not present in the API response!"
+                    f"But '{self._model_id}' is not present in the API response!"
                 )
                 return False
             return True
@@ -1303,7 +1337,7 @@ if __name__ == "__main__":
     api_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     if api_key is not None and api_endpoint is not None:
         prompter = OpenAIAzurePrompter(
-            prompt_format=OpenAIPromptFormat(),
+            prompt_format=VerbosePromptFormat(),
             api_key=api_key,
             azure_endpoint=api_endpoint,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
@@ -1311,10 +1345,10 @@ if __name__ == "__main__":
 
         if not prompter.ping():
             print("Azure API is not available, using human prompter.")
-            prompter = HumanPrompter(prompt_format=DefaultPromptFormat())
+            prompter = HumanPrompter(prompt_format=VerbosePromptFormat())
     else:
         print("No Azure API key found, using human prompter.")
-        prompter = HumanPrompter(prompt_format=DefaultPromptFormat())
+        prompter = HumanPrompter(prompt_format=VerbosePromptFormat())
 
     # Test
     term = "Pyogenic liver abscess"
