@@ -613,9 +613,9 @@ Interfaces prompts to the LLM agent and parses answers.
     ):
         _ = args, kwargs
         self.prompt_format = prompt_format
-        self.cache: sqlite3.Connection | None = None
+        self.cache: PromptCache | None = None
         if use_cache:
-            self.cache = sqlite3.connect("prompt_cache.db")
+            self.cache = PromptCache(sqlite3.connect("prompt_cache.db"))
 
     def unwrap_class_answer(
         self,
@@ -855,6 +855,8 @@ A prompter that interfaces with the OpenAI API using Azure.
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+
+        print("Initializing the Azure API client...")
         self._client = openai.AzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
@@ -865,13 +867,26 @@ A prompter that interfaces with the OpenAI API using Azure.
 
     def ping(self) -> bool:
         print("Pinging the Azure API...")
+        # Ping by retrieving the list of models
+        headers = {"api-key": self._client.api_key}
         try:
-            response = requests.get(self._endpoint, timeout=5)
+            models = self._client.models.list(extra_headers=headers, timeout=5)
         except requests.ConnectTimeout:
             print("Connection timed out")
             return False
-        print("Response:", response.status_code)
-        return response.ok
+        response: dict = models.model_dump()
+        success = response.get("data", []) != []
+        if success:
+            print("API is available")
+            if self._model not in [obj["id"] for obj in response["data"]]:
+                print(
+                    f"But '{self._model}' is not present in the API response!"
+                )
+                return False
+            return True
+
+        print("API is not available")
+        return False
 
     def prompt_supertype(
         self,
