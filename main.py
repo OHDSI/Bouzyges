@@ -905,7 +905,7 @@ A prompter that interfaces with the OpenAI API using Azure.
         headers = {"api-key": self._client.api_key}
         try:
             models = self._client.models.list(extra_headers=headers, timeout=5)
-        except requests.ConnectTimeout:
+        except openai.APITimeoutError:
             print("Connection timed out")
             return False
         response: dict = models.model_dump()
