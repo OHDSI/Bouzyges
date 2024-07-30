@@ -906,7 +906,7 @@ class SnowstormAPI:
     @staticmethod
     def print_attribute_model_hierarchy(amh: dict) -> None:
         def print_node(node, indent):
-            print("  " * indent, f"{node["conceptId"]}:", node["pt"]["term"])
+            print("  " * indent, f"{node['conceptId']}:", node["pt"]["term"])
             for child in node.get("children", ()):
                 print_node(child, indent + 1)
 
