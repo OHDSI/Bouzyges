@@ -73,6 +73,10 @@ WHITELISTED_SUPERTYPES: set[SCTID] = {
 NULL_ANSWER = EscapeHatch()
 
 
+### "Is a" relationships
+IS_A = SCTID(116680003)
+
+
 ## Dataclasses
 ### SNOMED modelling
 @dataclass(frozen=True, slots=True)
@@ -340,7 +344,9 @@ Get the answer from the cache for specified model.
             query,
             (model, prompt.prompt_message, api_options),
         )
-        return cursor.fetchone()
+        if answer := cursor.fetchone():
+            return answer[0]
+        return None
 
     def remember(self, model: str, prompt: Prompt, response: str) -> None:
         """\
@@ -518,7 +524,7 @@ Contains no API options, intended for human prompters.
             prompt += term_context
 
         prompt += "\n\nOptions, in no particular order:\n"
-        for option in options:
+        for option in sorted(options):  # Sort for cache consistency
             prompt += f" - {cls.wrap_term(option)}"
             if options_context and option in options_context:
                 prompt += f": {options_context[option]}"
@@ -582,7 +588,7 @@ Contains no API options, intended for human prompters.
             prompt += attribute_context
 
         prompt += "\n\nOptions, in no particular order:\n"
-        for option in options:
+        for option in sorted(options):  # Sort for cache consistency
             prompt += f" - {cls.wrap_term(option)}"
             if options_context and option in options_context:
                 prompt += f": {options_context[option]}"
@@ -768,13 +774,14 @@ TODO: Interface with a shock collar.
 
         # Try the cache
         if self.cache:
-            cached_answer = self.cache.get(self._model_id, prompt)
-            if cached_answer:
-                return self.unwrap_class_answer(
+            if cached_answer := self.cache.get(self._model_id, prompt):
+                answer = self.unwrap_class_answer(
                     cached_answer,
                     options,
                     EscapeHatch.WORD if allow_escape else None,
                 )
+                print(f"From cache: {answer} is a supertype of {term}")
+                return answer
 
         # Get the answer
         while True:
@@ -805,9 +812,13 @@ TODO: Interface with a shock collar.
         )
 
         if self.cache:
-            cached_answer = self.cache.get(self._model_id, prompt)
-            if cached_answer:
-                return self.unwrap_bool_answer(cached_answer)
+            if cached_answer := self.cache.get(self._model_id, prompt):
+                answer = self.unwrap_bool_answer(cached_answer)
+                print(
+                    f"From cache: The attribute '{attribute}' is "
+                    f"{'present' if answer else 'absent'} in '{term}'"
+                )
+                return answer
 
         while True:
             print(prompt.prompt_message)
@@ -841,13 +852,17 @@ TODO: Interface with a shock collar.
         )
 
         if self.cache:
-            cached_answer = self.cache.get(self._model_id, prompt)
-            if cached_answer:
-                return self.unwrap_class_answer(
+            if cached_answer := self.cache.get(self._model_id, prompt):
+                answer = self.unwrap_class_answer(
                     cached_answer,
                     options,
                     EscapeHatch.WORD if allow_escape else None,
                 )
+                print(
+                    f"From cache: The value of the attribute '{attribute}' in "
+                    f"'{term}' is '{answer}'"
+                )
+                return answer
 
         while True:
             print(prompt.prompt_message)
@@ -1028,6 +1043,7 @@ class SnowstormAPI:
         return [
             AttributeConstraints.from_json(attr)
             for attr in response.json()["items"]
+            if SCTID(attr["id"]) != IS_A  # Exclude hierarchy
         ]
 
     @staticmethod
@@ -1133,9 +1149,6 @@ do
             # Attribute has no valid range for selected ancestors
             return {}
 
-        print("Attribute data:")
-        print(json.dumps(attribute_data, indent=2))
-
         constraint = ECLExpression(
             attribute_data["attributeRange"][0]["rangeConstraint"]
         )
@@ -1147,7 +1160,7 @@ do
 
     def get_pt(self, id: SCTID) -> SCTDescription:
         response = requests.get(
-            url=self.url + f"concepts/{id}",
+            url=self.url + self.branch_path + f"/concepts/{id}",
             headers={"Accept": "application/json"},
         )
         if not response.ok:
@@ -1228,7 +1241,6 @@ Initialize supertypes for all terms to start building portraits.
 
     def populate_attribute_candidates(self) -> None:
         for term, portrait in self.portraits.items():
-            print("Possible attributes for:", term)
             attributes = self.snowstorm.get_attribute_suggestions(
                 portrait.ancestor_anchors
             )
@@ -1239,6 +1251,10 @@ Initialize supertypes for all terms to start building portraits.
                 for attribute in attributes
                 if attribute.sctid not in portrait.rejected_attributes
             ]
+
+            print("Possible attributes for:", term)
+            for attribute in attributes:
+                print(" - ", attribute.pt)
 
             # Confirm the attributes
             for attribute in attributes:
@@ -1263,12 +1279,12 @@ Initialize supertypes for all terms to start building portraits.
         for portrait in self.portraits.values():
             rejected = set()
             for attribute in portrait.unchecked_attributes:
+                print("Attribute:", attribute)
                 # Get possible attribute values
                 values_options = self.snowstorm.get_attribute_values(
                     ancestors=portrait.ancestor_anchors,
                     attribute=attribute,
                 )
-                print("Attribute:", attribute)
                 print("Values:", values_options)
 
                 if not values_options:
