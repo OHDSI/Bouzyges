@@ -1273,6 +1273,16 @@ do
 
         return False
 
+    def is_attr_val_descendant_of(
+        self, child: AttributeRelationship, parent: AttributeRelationship
+    ) -> bool:
+        """\
+Check if the child attribute-value pair is a subtype of the parent.
+"""
+        return self.is_concept_descendant_of(
+            child.attribute, parent.attribute
+        ) and self.is_concept_descendant_of(child.value, parent.value)
+
 
 # Main logic host
 class Bouzyges:
@@ -1477,6 +1487,12 @@ Check if the particular portrait can be a subtype of a parent concept.
         if not parent_concept.defined:
             # Subsumption is not possible
             return False
+
+        # TODO: To implement subsumption:
+        # - Check if any Portrait parents are subtypes of the parent
+        # - Check if all attr-val pairs are subtypes of the parent
+        #   - For now, we do not worry about the groups; we may have to once
+        #     we allow multiple of a same attribute
 
         raise NotImplementedError
 
