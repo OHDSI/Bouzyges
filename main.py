@@ -173,6 +173,7 @@ Represents a range of values of an attribute.
     pt: SCTDescription
     range_constraint: ECLExpression
     attribute_rule: ECLExpression
+    contentType: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,17 +185,17 @@ concepts.
 
     sctid: SCTID
     pt: SCTDescription
-    attributeDomain: Iterable[AttributeDomain]
+    attribute_domain: Iterable[AttributeDomain]
     # May actually not be required
     # because /mrcm/{branch}/attribute-values/ exists
-    attributeRange: Iterable[AttributeRange]
+    attribute_range: Iterable[AttributeRange]
 
     @classmethod
     def from_json(cls, json_data: dict):
         return cls(
             sctid=SCTID(json_data["conceptId"]),
             pt=SCTDescription(json_data["pt"]["term"]),
-            attributeDomain=[
+            attribute_domain=[
                 AttributeDomain(
                     sctid=SCTID(json_data["conceptId"]),
                     pt=SCTDescription(json_data["pt"]["term"]),
@@ -211,12 +212,13 @@ concepts.
                 )
                 for ad in json_data["attributeDomain"]
             ],
-            attributeRange=[
+            attribute_range=[
                 AttributeRange(
                     sctid=SCTID(json_data["conceptId"]),
                     pt=SCTDescription(json_data["pt"]["term"]),
                     range_constraint=ECLExpression(ar["rangeConstraint"]),
                     attribute_rule=ECLExpression(ar["attributeRule"]),
+                    contentType=ar["contentType"],
                 )
                 for ar in json_data["attributeRange"]
             ],
@@ -247,6 +249,7 @@ Represents an interactively built semantic portrait of a source concept."""
         self.rejected_attributes: set[SCTID] = set()
 
         self.state = self.State.MISSING_SUPERTYPES
+        self.relevant_constraints: dict[SCTID, AttributeConstraints] = {}
 
     def update_state(self) -> None:
         if not self.ancestor_anchors:
@@ -982,6 +985,7 @@ A prompter that interfaces with the OpenAI API using Azure.
 
 class SnowstormAPI:
     TARGET_CODESYSTEM = "SNOMEDCT"
+    CONTENT_TYPE_PREFERENCE = "NEW_PRECOORDINATED", "PRECOORDINATED", "ALL"
 
     def __init__(self, url: URL):
         self.url: URL = url
@@ -1024,12 +1028,12 @@ class SnowstormAPI:
 
     def get_attribute_suggestions(
         self, parent_ids: Iterable[SCTID]
-    ) -> list[AttributeConstraints]:
+    ) -> dict[SCTID, AttributeConstraints]:
         params = {
             "parentIds": [*parent_ids],
             "proximalPrimitiveModeling": True,  # Maybe?
             # Filter post-coordination for now
-            "contentType": "NEW_PRECOORDINATED",
+            "contentType": "ALL",
         }
 
         response = requests.get(
@@ -1040,11 +1044,11 @@ class SnowstormAPI:
         if not response.ok:
             raise SnowstormRequestError.from_response(response)
 
-        return [
-            AttributeConstraints.from_json(attr)
+        return {
+            SCTID(attr["id"]): AttributeConstraints.from_json(attr)
             for attr in response.json()["items"]
             if SCTID(attr["id"]) != IS_A  # Exclude hierarchy
-        ]
+        }
 
     @staticmethod
     def print_attribute_model_hierarchy(amh: dict) -> None:
@@ -1122,51 +1126,20 @@ do
         return parents
 
     def get_attribute_values(
-        self, ancestors: Iterable[SCTID], attribute: SCTID
+        self, portrait: SemanticPortrait, attribute: SCTID
     ) -> dict[SCTID, SCTDescription]:
         # First, obtain the range constraints
-        params = {
-            "parentIds": [*ancestors],
-            "proximalPrimitiveModeling": True,  # Maybe?
-            "contentType": "NEW_PRECOORDINATED",
-        }
+        ranges = portrait.relevant_constraints[attribute].attribute_range
 
-        response = requests.get(
-            url=self.url + "mrcm/" + self.branch_path + "/domain-attributes",
-            params=params,
-            headers={"Accept": "application/json"},
-        )
+        # Choose preferred content type
+        for ctype in self.CONTENT_TYPE_PREFERENCE:
+            for r in ranges:
+                if r.contentType == ctype:
+                    return self._range_constraint_to_parents(r.range_constraint)
 
-        if not response.ok:
-            raise SnowstormRequestError.from_response(response)
-
-        # Find the attribute in the response
-        for attr in response.json()["items"]:
-            if SCTID(attr["conceptId"]) == attribute:
-                attribute_data = attr
-                break
-        else:
-            # Attribute has no valid range for selected ancestors
-            return {}
-
-        constraint = ECLExpression(
-            attribute_data["attributeRange"][0]["rangeConstraint"]
-        )
-
-        values: dict[SCTID, SCTDescription] = self._range_constraint_to_parents(
-            constraint
-        )
-        return values
-
-    def get_pt(self, id: SCTID) -> SCTDescription:
-        response = requests.get(
-            url=self.url + self.branch_path + f"/concepts/{id}",
-            headers={"Accept": "application/json"},
-        )
-        if not response.ok:
-            raise SnowstormRequestError.from_response(response)
-
-        return SCTDescription(response.json()["pt"]["term"])
+        # No range of allowed content types found!
+        print(f"No range constraint found for {attribute}")
+        return {}
 
 
 # Main logic host
@@ -1246,18 +1219,15 @@ Initialize supertypes for all terms to start building portraits.
             )
 
             # Remove previously rejected attributes
-            attributes = [
-                attribute
-                for attribute in attributes
-                if attribute.sctid not in portrait.rejected_attributes
-            ]
+            for attribute in portrait.rejected_attributes:
+                attributes.pop(attribute, None)
 
             print("Possible attributes for:", term)
-            for attribute in attributes:
-                print(" - ", attribute.pt)
+            for sctid, attribute in attributes.items():
+                print(" - ", sctid, attribute.pt)
 
             # Confirm the attributes
-            for attribute in attributes:
+            for attribute in attributes.values():
                 accept = self.prompter.prompt_attr_presence(
                     term=portrait.source_term,
                     attribute=attribute.pt,
@@ -1275,6 +1245,12 @@ Initialize supertypes for all terms to start building portraits.
                 if accept:
                     portrait.unchecked_attributes.add(attribute.sctid)
 
+            # Remember the constraints
+            for sctid, attribute in attributes.items():
+                if sctid not in portrait.unchecked_attributes:
+                    continue
+                portrait.relevant_constraints[sctid] = attribute
+
     def populate_unchecked_attributes(self) -> None:
         for portrait in self.portraits.values():
             rejected = set()
@@ -1282,8 +1258,7 @@ Initialize supertypes for all terms to start building portraits.
                 print("Attribute:", attribute)
                 # Get possible attribute values
                 values_options = self.snowstorm.get_attribute_values(
-                    ancestors=portrait.ancestor_anchors,
-                    attribute=attribute,
+                    portrait, attribute
                 )
                 print("Values:", values_options)
 
@@ -1299,7 +1274,7 @@ Initialize supertypes for all terms to start building portraits.
                 # Prompt for the value
                 value_term = self.prompter.prompt_attr_value(
                     term=portrait.source_term,
-                    attribute=snowstorm.get_pt(attribute),
+                    attribute=portrait.relevant_constraints[attribute].pt,
                     options=values_options.values(),
                     term_context="; ".join(portrait.context)
                     if portrait.context
