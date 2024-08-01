@@ -91,8 +91,61 @@ class AttributeRelationship:
 class AttributeGroup:
     """Represents a SNOMED CT attribute group."""
 
-    group_id: SCTID
     relationships: frozenset[AttributeRelationship]
+
+
+@dataclass(frozen=True, slots=True)
+class Concept:
+    """Represents a SNOMED CT concept."""
+
+    sctid: SCTID
+    pt: SCTDescription
+    fsn: SCTDescription
+    groups: frozenset[AttributeGroup]
+    ungrouped: frozenset[AttributeRelationship]
+    defined: bool
+
+    @classmethod
+    def from_rela_json(cls, relationship_data: list[dict]):
+        # Get concept proper info
+        # Everyone is expected to have at least an 'Is a' relationship
+        # Except root, but encountering it is an error
+        if len(relationship_data) == 0:
+            raise ValueError("No relationships found; could it be a root?")
+
+        specimen = relationship_data[0]
+        sctid = SCTID(specimen["sourceId"])
+        pt = SCTDescription(specimen["sourcePt"]["term"])
+        fsn = SCTDescription(specimen["sourceFsn"]["term"])
+        defined = specimen["definitionStatusId"] == "FULLY_DEFINED"
+
+        # Get relationships
+        groups: dict[int, set[AttributeRelationship]] = {}
+        ungrouped: set[AttributeRelationship] = set()
+        for relationship in relationship_data:
+            attribute = SCTID(relationship["type"]["conceptId"])
+            # Skip 'Is a' relationships here
+            if attribute == IS_A:
+                continue
+            value = SCTID(relationship["target"]["conceptId"])
+            group = relationship["groupId"]
+            rel = AttributeRelationship(attribute, value)
+            if group == 0:
+                ungrouped.add(rel)
+            else:
+                groups.setdefault(group, set()).add(rel)
+
+        return cls(
+            sctid=sctid,
+            pt=pt,
+            fsn=fsn,
+            groups=frozenset(
+                AttributeGroup(frozenset(relationships))
+                for relationships in groups.values()
+            ),
+            ungrouped=frozenset(ungrouped),
+            defined=defined,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1016,6 +1069,37 @@ class SnowstormAPI:
             f"Target codesystem {self.TARGET_CODESYSTEM} is not present"
         )
 
+    def get_concept(self, sctid: SCTID) -> Concept:
+        """\
+Get full concept information.
+
+Uses relationships endpoint to get all relationships, including groups.
+"""
+        total = 0
+        offset = 0
+        step = 100
+        collected_items = []
+
+        while offset < total or total == 0:
+            response = requests.get(
+                url=self.url + f"{self.branch_path}/relationships",
+                params={
+                    "active": True,
+                    "sourceId": sctid,
+                    "offset": offset,
+                    "limit": step,
+                },
+                headers={"Accept": "application/json"},
+            )
+            if not response.ok:
+                raise SnowstormRequestError.from_response(response)
+
+            collected_items.extend(response.json()["items"])
+            total = response.json()["total"]
+            offset += step
+
+        return Concept.from_rela_json(collected_items)
+
     def get_branch_info(self) -> dict:
         response = requests.get(
             self.url + f"branches/{self.branch_path}",
@@ -1350,6 +1434,13 @@ Update existing attribute values with the most precise descendant for all terms.
                         break
 
                     new_attributes[attribute] = descriptions[value_term]
+
+    def check_subsumption(
+        self, parent: SCTID, portrait: SemanticPortrait
+    ) -> bool:
+        """\
+Check if the particular portrait can be a subtype of a parent concept.
+"""
 
 
 if __name__ == "__main__":
