@@ -1075,12 +1075,12 @@ Get full concept information.
 
 Uses relationships endpoint to get all relationships, including groups.
 """
-        total = 0
+        total = None
         offset = 0
         step = 100
         collected_items = []
 
-        while offset < total or total == 0:
+        while total is None or offset < total:
             response = requests.get(
                 url=self.url + f"{self.branch_path}/relationships",
                 params={
@@ -1146,12 +1146,12 @@ Uses relationships endpoint to get all relationships, including groups.
     def get_mrcm_domain_reference_set_entries(
         self,
     ) -> list[dict]:
-        total = 0
+        total = None
         offset = 0
         step = 100
         collected_items = []
 
-        while offset < total or total == 0:
+        while total is None or offset < total:
             response = requests.get(
                 url=self.url + f"/{self.branch_path}/members",
                 params={
@@ -1240,6 +1240,38 @@ do
             SCTID(child["conceptId"]): SCTDescription(child["pt"]["term"])
             for child in response.json()
         }
+
+    def is_concept_descendant_of(self, child: SCTID, parent: SCTID) -> bool:
+        if child == parent:
+            return True
+
+        total = None
+        offset = 0
+        step = 100
+
+        while total is None or offset < total:
+            response = requests.get(
+                url=self.url
+                + f"{self.branch_path}/concepts/{parent}/descendants",
+                params={
+                    "stated": False,
+                    "offset": offset,
+                    "limit": step,
+                },
+                headers={"Accept": "application/json"},
+            )
+            if not response.ok:
+                raise SnowstormRequestError.from_response(response)
+
+            if any(
+                child == SCTID(concept["conceptId"])
+                for concept in response.json()
+            ):
+                return True
+            total = response.json()["total"]
+            offset += step
+
+        return False
 
 
 # Main logic host
@@ -1441,6 +1473,12 @@ Update existing attribute values with the most precise descendant for all terms.
         """\
 Check if the particular portrait can be a subtype of a parent concept.
 """
+        parent_concept = self.snowstorm.get_concept(parent)
+        if not parent_concept.defined:
+            # Subsumption is not possible
+            return False
+
+        raise NotImplementedError
 
 
 if __name__ == "__main__":
