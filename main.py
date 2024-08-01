@@ -1141,6 +1141,22 @@ do
         print(f"No range constraint found for {attribute}")
         return {}
 
+    def get_concept_children(
+        self, parent: SCTID
+    ) -> dict[SCTID, SCTDescription]:
+        response = requests.get(
+            url=f"{self.url}browser/{self.branch_path}"
+            + f"/concepts/{parent}/children",
+            headers={"Accept": "application/json", "form": "inferred"},
+        )
+        if not response.ok:
+            raise SnowstormRequestError.from_response(response)
+
+        return {
+            SCTID(child["conceptId"]): SCTDescription(child["pt"]["term"])
+            for child in response.json()
+        }
+
 
 # Main logic host
 class Bouzyges:
@@ -1299,6 +1315,42 @@ Initialize supertypes for all terms to start building portraits.
             # All are seen by now
             portrait.unchecked_attributes = set()
 
+    def update_existing_attr_values(self) -> None:
+        """\
+Update existing attribute values with the most precise descendant for all terms.
+"""
+        for source_term, portrait in self.portraits.items():
+            new_attributes = {}
+            for attribute, value in portrait.attributes.items():
+                new_attributes[attribute] = value
+                while True:
+                    # Get children of the current value
+                    children = self.snowstorm.get_concept_children(
+                        new_attributes[attribute]
+                    )
+                    if not children:
+                        # Leaf node
+                        break
+
+                    descriptions = {v: k for k, v in children.items()}
+
+                    # Prompt for the most precise value
+                    value_term = self.prompter.prompt_attr_value(
+                        term=source_term,
+                        attribute=portrait.relevant_constraints[attribute].pt,
+                        options=descriptions,
+                        term_context="; ".join(portrait.context)
+                        if portrait.context
+                        else None,
+                        allow_escape=True,
+                    )
+
+                    if isinstance(value_term, EscapeHatch):
+                        # None of the children are correct
+                        break
+
+                    new_attributes[attribute] = descriptions[value_term]
+
 
 if __name__ == "__main__":
     # Load environment variables for API access
@@ -1353,3 +1405,4 @@ if __name__ == "__main__":
 
     bouzyges.populate_attribute_candidates()
     bouzyges.populate_unchecked_attributes()
+    bouzyges.update_existing_attr_values()
