@@ -77,6 +77,10 @@ NULL_ANSWER = EscapeHatch()
 IS_A = SCTID(116680003)
 
 
+# SNOMED root concept
+ROOT_CONCEPT = SCTID(138875005)
+
+
 ## Dataclasses
 ### SNOMED modelling
 @dataclass(frozen=True, slots=True)
@@ -1206,6 +1210,11 @@ do
             if failure:
                 print(f"{rc} is not a simple disjunction of SCTIDs!")
                 raise NotImplementedError
+
+        # If there is more than one available parent, remove the root
+        # Only seen in post-coordination ranges so far, but just in case
+        if len(parents) > 1:
+            parents.pop(ROOT_CONCEPT, None)
 
         return parents
 
