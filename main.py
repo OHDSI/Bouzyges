@@ -1250,8 +1250,13 @@ do
             for child in response.json()
         }
 
-    def is_concept_descendant_of(self, child: SCTID, parent: SCTID) -> bool:
-        if child == parent:
+    def is_concept_descendant_of(
+        self,
+        child: SCTID,
+        parent: SCTID,
+        self_is_parent: bool = True,
+    ) -> bool:
+        if self_is_parent and child == parent:
             return True
 
         total = None
@@ -1486,7 +1491,7 @@ Update existing attribute values with the most precise descendant for all terms.
 
                     new_attributes[attribute] = descriptions[value_term]
 
-    def check_subsumption(
+    def check_inferred_subsumption(
         self, parent: SCTID, portrait: SemanticPortrait
     ) -> bool:
         """\
@@ -1497,13 +1502,29 @@ Check if the particular portrait can be a subtype of a parent concept.
             # Subsumption is not possible
             return False
 
-        # TODO: To implement subsumption:
-        # - Check if any Portrait parents are subtypes of the parent
-        # - Check if all attr-val pairs are subtypes of the parent
-        #   - For now, we do not worry about the groups; we may have to once
-        #     we allow multiple of a same attribute
+        # Check if any Portrait parents are subtypes of the parent
+        if not any(
+            self.snowstorm.is_concept_descendant_of(anchor, parent)
+            for anchor in portrait.ancestor_anchors
+        ):
+            return False
 
-        raise NotImplementedError
+        # For now, we do not worry about the groups; we may have to once
+        # we allow multiple of a same attribute
+        unmatched_concept_relationships: set[AttributeRelationship] = set()
+        for group in parent_concept.groups:
+            unmatched_concept_relationships |= group.relationships
+        unmatched_concept_relationships |= parent_concept.ungrouped
+
+        for a, v in portrait.attributes.items():
+            p_rel = AttributeRelationship(a, v)
+            matched = set()
+            for c_rel in unmatched_concept_relationships:
+                if self.snowstorm.is_attr_val_descendant_of(p_rel, c_rel):
+                    matched.add(c_rel)
+            unmatched_concept_relationships -= matched
+
+        return not unmatched_concept_relationships
 
 
 if __name__ == "__main__":
