@@ -489,7 +489,7 @@ Abstract class for formatting prompts for the LLM agent.
         """Wrap a term in square brackets."""
         return f"[{term}]"
 
-    @classmethod
+    @abstractmethod
     def form_supertype(
         cls,
         term: str,
@@ -502,10 +502,8 @@ Abstract class for formatting prompts for the LLM agent.
 Format a prompt for the LLM agent to choose the best matching proximal ancestor
 for a term.
 """
-        _ = term, options, allow_escape, term_context, options_context
-        raise NotImplementedError
 
-    @classmethod
+    @abstractmethod
     def form_attr_presence(
         cls,
         term: str,
@@ -517,10 +515,8 @@ for a term.
 Format a prompt for the LLM agent to decide if an attribute is present in a
 term.
 """
-        _ = term, attribute, term_context, attribute_context
-        raise NotImplementedError
 
-    @classmethod
+    @abstractmethod
     def form_attr_value(
         cls,
         term: str,
@@ -534,16 +530,19 @@ term.
         """\
 Format a prompt for the LLM agent to choose the value of an attribute in a term.
 """
-        _ = (
-            term,
-            attribute,
-            options,
-            term_context,
-            attribute_context,
-            options_context,
-            allow_escape,
-        )
-        raise NotImplementedError
+
+    @abstractmethod
+    def form_subsumption(
+        self,
+        term: str,
+        prospective_supertype: SCTDescription,
+        term_context: str | None = None,
+        supertype_context: str | None = None,
+    ) -> Prompt:
+        """\
+Format a prompt for the LLM agent to decide if a term is a subtype of an 
+existing (primitive) concept.
+"""
 
 
 class VerbosePromptFormat(PromptFormat):
@@ -553,27 +552,25 @@ Default simple verbose prompt format for the LLM agent.
 Contains no API options, intended for human prompters.
     """
 
-    @classmethod
-    def _form_shared_header(cls, allow_escape) -> str:
+    def _form_shared_header(self, allow_escape) -> str:
         prompt = ""
-        prompt += "You are " + cls.ROLE + ".\n\n"
-        prompt += "Your assignment is " + cls.TASK + ".\n\n"
-        prompt += "Please note that " + cls.REQUIREMENTS + ".\n\n"
+        prompt += "You are " + self.ROLE + ".\n\n"
+        prompt += "Your assignment is " + self.TASK + ".\n\n"
+        prompt += "Please note that " + self.REQUIREMENTS + ".\n\n"
         prompt += "Your exact instructions are:\n\n"
-        prompt += cls.INSTRUCTIONS + (allow_escape * cls.ESCAPE_INSTRUCTIONS)
+        prompt += self.INSTRUCTIONS + (allow_escape * self.ESCAPE_INSTRUCTIONS)
         prompt += "\n\n"
         return prompt
 
-    @classmethod
     def form_supertype(
-        cls,
+        self,
         term: str,
         options: Iterable[SCTDescription],
         allow_escape: bool = True,
         term_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
     ) -> Prompt:
-        prompt = cls._form_shared_header(allow_escape)
+        prompt = self._form_shared_header(allow_escape)
 
         prompt += (
             f"Given the term '{term}', what is the closest supertype or exact "
@@ -585,7 +582,7 @@ Contains no API options, intended for human prompters.
 
         prompt += "\n\nOptions, in no particular order:\n"
         for option in sorted(options):  # Sort for cache consistency
-            prompt += f" - {cls.wrap_term(option)}"
+            prompt += f" - {self.wrap_term(option)}"
             if options_context and option in options_context:
                 prompt += f": {options_context[option]}"
             prompt += "\n"
@@ -598,15 +595,14 @@ Contains no API options, intended for human prompters.
             EscapeHatch.WORD if allow_escape else None,
         )
 
-    @classmethod
     def form_attr_presence(
-        cls,
+        self,
         term: str,
         attribute: SCTDescription,
         term_context: str | None = None,
         attribute_context: str | None = None,
     ) -> Prompt:
-        prompt = cls._form_shared_header(allow_escape=False)
+        prompt = self._form_shared_header(allow_escape=False)
         prompt += (
             f"Is the attribute '{attribute}' present in the term '{term}'?"
         )
@@ -624,9 +620,8 @@ Contains no API options, intended for human prompters.
 """
         return Prompt(prompt, frozenset((BooleanAnswer.YES, BooleanAnswer.NO)))
 
-    @classmethod
     def form_attr_value(
-        cls,
+        self,
         term: str,
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
@@ -635,7 +630,7 @@ Contains no API options, intended for human prompters.
         options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
     ) -> Prompt:
-        prompt = cls._form_shared_header(allow_escape=allow_escape)
+        prompt = self._form_shared_header(allow_escape=allow_escape)
         prompt += (
             f"Choose the value of the attribute '{attribute}' in the term "
             f"'{term}'."
@@ -649,13 +644,41 @@ Contains no API options, intended for human prompters.
 
         prompt += "\n\nOptions, in no particular order:\n"
         for option in sorted(options):  # Sort for cache consistency
-            prompt += f" - {cls.wrap_term(option)}"
+            prompt += f" - {self.wrap_term(option)}"
             if options_context and option in options_context:
                 prompt += f": {options_context[option]}"
             prompt += "\n"
         # Remind of the escape hatch, just in case
         prompt += f" - {EscapeHatch.WORD}: " "None of the above\n"
         return Prompt(prompt, frozenset(options), EscapeHatch.WORD)
+
+    def form_subsumption(
+        self,
+        term: str,
+        prospective_supertype: SCTDescription,
+        term_context: str | None = None,
+        supertype_context: str | None = None,
+    ) -> Prompt:
+        prompt = self._form_shared_header(allow_escape=False)
+        prompt += (
+            f"Is the term '{term}' a subtype of the concept "
+            f"'{prospective_supertype}'?"
+        )
+
+        if term_context:
+            prompt += " Following information is provided about the term: "
+            prompt += term_context
+
+        if supertype_context:
+            prompt += " Following information is provided about the concept: "
+            prompt += supertype_context
+
+        prompt += "\n\n"
+        prompt += f"""Options are:
+ - {BooleanAnswer.YES}: The term is a subtype of the concept.
+ - {BooleanAnswer.NO}: The term is not a subtype of the concept.
+"""
+        return Prompt(prompt, frozenset((BooleanAnswer.YES, BooleanAnswer.NO)))
 
 
 ## Logic prompter classes
@@ -800,6 +823,21 @@ Prompt the model to choose the value of an attribute in a term.
 """
 
     @abstractmethod
+    def prompt_subsumption(
+        self,
+        term: str,
+        prospective_supertype: SCTDescription,
+        term_context: str | None = None,
+        supertype_context: str | None = None,
+    ) -> bool:
+        """\
+Prompt the model to decide if a term is a subtype of a prospective supertype.
+
+Only meant to be used for Primitive concepts: use Bouzyges.check_subsumption for
+Fully Defined concepts.
+"""
+
+    @abstractmethod
     def ping(self) -> bool:
         """\
 Check if the API is available.
@@ -940,6 +978,38 @@ TODO: Interface with a shock collar.
                 print("Error:", e)
                 print("Please, provide an answer in the requested format.")
 
+    def prompt_subsumption(
+        self,
+        term: str,
+        prospective_supertype: SCTDescription,
+        term_context: str | None = None,
+        supertype_context: str | None = None,
+    ) -> bool:
+        prompt: Prompt = self.prompt_format.form_subsumption(
+            term, prospective_supertype, term_context, supertype_context
+        )
+
+        if self.cache:
+            if cached_answer := self.cache.get(self._model_id, prompt):
+                answer = self.unwrap_bool_answer(cached_answer)
+                print(
+                    f"From cache: The term '{term}' is",
+                    "a subtype" if answer else "not a subtype",
+                    f"of '{prospective_supertype}'",
+                )
+                return answer
+
+        while True:
+            print(prompt.prompt_message)
+            brain_answer = input("Answer: ").strip()
+            try:
+                answer = self.unwrap_bool_answer(brain_answer)
+                self.cache_remember(prompt, brain_answer)
+                return answer
+            except PrompterError as e:
+                print("Error:", e)
+                print("Please, provide an answer in the requested format.")
+
     def ping(self) -> bool:
         input("Hey, are you here? (Press Enter) ")
         print("Good human.")
@@ -1037,6 +1107,16 @@ A prompter that interfaces with the OpenAI API using Azure.
             options_context,
             allow_escape,
         )
+        raise NotImplementedError
+
+    def prompt_subsumption(
+        self,
+        term: str,
+        prospective_supertype: SCTDescription,
+        term_context: str | None = None,
+        supertype_context: str | None = None,
+    ) -> bool:
+        _ = term, prospective_supertype, term_context, supertype_context
         raise NotImplementedError
 
 
