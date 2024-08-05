@@ -1136,6 +1136,9 @@ class SnowstormAPI:
         self.url: URL = url
         self.branch_path: BranchPath = self.get_main_branch_path()
 
+        # Subsumption checks are numerous and repetitive, so cache them
+        self.__subsumptions_cache: dict[tuple[SCTID, SCTID], bool] = {}
+
     def get_version(self) -> str:
         response = requests.get(
             self.url + "version", headers={"Accept": "application/json"}
@@ -1337,7 +1340,7 @@ do
 
         children: dict[SCTID, SCTDescription] = {}
         for child in response.json():
-            skip: bool = bool(require_property) and all(
+            skip: bool = (require_property is not None) and not all(
                 child.get(k) == v for k, v in require_property.items()
             )
             if not skip:
@@ -1353,36 +1356,31 @@ do
         parent: SCTID,
         self_is_parent: bool = True,
     ) -> bool:
+        """\
+Implements a subsumption check for concepts in the SNOMED CT hierarchy.
+Returns True if the child is a descendant of the parent, and False otherwise.
+
+See: https://confluence.ihtsdotools.org/display/DOCTSG/4.5+Get+and+Test+\
+Concept+Subtypes+and+Supertypes
+"""
         if self_is_parent and child == parent:
             return True
 
-        total = None
-        offset = 0
-        step = 100
+        if (child, parent) in self.__subsumptions_cache:
+            return self.__subsumptions_cache[(child, parent)]
 
-        while total is None or offset < total:
-            response = requests.get(
-                url=self.url
-                + f"{self.branch_path}/concepts/{parent}/descendants",
-                params={
-                    "stated": False,
-                    "offset": offset,
-                    "limit": step,
-                },
-                headers={"Accept": "application/json"},
-            )
-            if not response.ok:
-                raise SnowstormRequestError.from_response(response)
+        response = requests.get(
+            url=self.url + f"{self.branch_path}/concepts/",
+            params={
+                "ecl": f"<{parent}",  # Is a subtype of
+                "conceptIds": [child],  # limit to known child
+            },
+            headers={"Accept": "application/json"},
+        )
 
-            if any(
-                child == SCTID(concept["conceptId"])
-                for concept in response.json()
-            ):
-                return True
-            total = response.json()["total"]
-            offset += step
-
-        return False
+        out = bool(response.json()["total"])  # Should be 1 or 0
+        self.__subsumptions_cache[(child, parent)] = out  # Cache the result
+        return out
 
     def is_attr_val_descendant_of(
         self, child: AttributeRelationship, parent: AttributeRelationship
@@ -1390,6 +1388,7 @@ do
         """\
 Check if the child attribute-value pair is a subtype of the parent.
 """
+        print("Checking if", child, "is a subtype of", parent)
         return self.is_concept_descendant_of(
             child.attribute, parent.attribute
         ) and self.is_concept_descendant_of(child.value, parent.value)
@@ -1404,6 +1403,8 @@ Remove ancestors that are descendants of other ancestors.
         redundant_ancestors = set()
         for ancestor in ancestors:
             for other in ancestors:
+                if ancestor == other:
+                    continue
                 if self.is_concept_descendant_of(
                     ancestor, other, self_is_parent=False
                 ):
@@ -1658,6 +1659,10 @@ concepts.
 Update the ancestor anchors for one term to more precise primitive concepts.
 Return True if the parent anchors have changed, False otherwise.
 """
+        print("Updating ancestors for:", source_term)
+        print(
+            "Current ancestors:", ", ".join(map(str, portrait.ancestor_anchors))
+        )
         new_anchors = set()
         for anchor in portrait.ancestor_anchors:
             # Get all primitive descendants
@@ -1667,39 +1672,49 @@ Return True if the parent anchors have changed, False otherwise.
                     "definitionStatus": "PRIMITIVE",
                 },
             )
+            print(
+                f"Filtering {len(primitive_children)} primitive children "
+                f"of {anchor}"
+            )
 
             # Filter previously rejected ancestors including meta-ancestors
             removed = set()
-            for desc in primitive_children:
-                for bad in portrait.rejected_supertypes:
-                    if self.snowstorm.is_concept_descendant_of(desc, bad):
-                        removed.add(desc)
-                        break
+            for child in primitive_children:
+                if any(
+                    self.snowstorm.is_concept_descendant_of(child, bad)
+                    for bad in portrait.rejected_supertypes
+                ):
+                    removed.add(child)
+                    break
 
             primitive_children = {
-                k: v for k, v in primitive_children.items() if k not in removed
+                k: v
+                for k, v in primitive_children.items()
+                # Do not revisit denied children or known ancestors
+                if k not in removed | portrait.ancestor_anchors
             }
 
-            # Iterate over descendants and ask to include them
+            print(f"Filtered to {len(primitive_children)}")
+
+            # Iterate over descendants and ask if to include them
             # to the new anchors
-            for desc_id, desc_term in primitive_children.items():
+            for child_id, child_term in primitive_children.items():
                 include = self.prompter.prompt_subsumption(
                     term=source_term,
-                    prospective_supertype=desc_term,
+                    prospective_supertype=child_term,
                 )
                 if include:
-                    new_anchors.add(desc_id)
+                    new_anchors.add(child_id)
                 else:
                     # This will prevent expensive re-queries on descendants
-                    portrait.rejected_supertypes.add(desc_id)
+                    portrait.rejected_supertypes.add(child_id)
 
-        if not new_anchors:
+        if not new_anchors - portrait.ancestor_anchors:
+            print("No new ancestors found")
             return False
 
-        # Replace the anchor set with the new one
-        new_anchors |= portrait.ancestor_anchors
-        clean = self.snowstorm.remove_redundant_ancestors(new_anchors)
-        portrait.ancestor_anchors = clean
+        # Update the anchor set with the new one
+        portrait.ancestor_anchors |= new_anchors
         return True
 
 
@@ -1757,3 +1772,4 @@ if __name__ == "__main__":
     bouzyges.populate_attribute_candidates()
     bouzyges.populate_unchecked_attributes()
     bouzyges.update_existing_attr_values()
+    bouzyges.update_primitive_anchors()
