@@ -297,6 +297,10 @@ Represents an interactively built semantic portrait of a source concept."""
         MISSING_SUPERTYPES = 1  # No supertypes selected
         MISSING_ATTRIBUTES = 2  # No attributes selected
         MISSING_ATTRIBUTE_VALUES = 3  # Not all attributes have values
+        # Interim states
+        ATTRIBUTES_FILLED = 4  # All attributes have values or are rejected
+        PRIMITIVE_EXHAUSTED = 5  # Proximal primitive anchors are set
+        CLASSIFIED = 6  # Defined supertypes are set through classification
 
     def __init__(self, term: str, context: str | None = None) -> None:
         self.source_term: str = term
@@ -306,11 +310,12 @@ Represents an interactively built semantic portrait of a source concept."""
         self.unchecked_attributes: set[SCTID] = set()
         self.attributes: dict[SCTID, SCTID] = {}
         self.rejected_attributes: set[SCTID] = set()
+        self.rejected_supertypes: set[SCTID] = set()
 
         self.state = self.State.MISSING_SUPERTYPES
         self.relevant_constraints: dict[SCTID, AttributeConstraints] = {}
 
-    def update_state(self) -> None:
+    def check_state(self) -> None:
         if not self.ancestor_anchors:
             self.state = self.State.MISSING_SUPERTYPES
         elif not any(self.rejected_attributes) and not any(self.attributes):
@@ -319,8 +324,9 @@ Represents an interactively built semantic portrait of a source concept."""
             self.state = self.State.MISSING_ATTRIBUTE_VALUES
         else:
             # Portrait does not know if it or it's
-            # attributes have unresolved subtypes;
-            # It will report as completed
+            # attributes have unresolved subtypes; Nor if
+            # classification is complete.
+            # It will report self as completed
             self.state = self.State.COMPLETED
 
 
@@ -1388,6 +1394,23 @@ Check if the child attribute-value pair is a subtype of the parent.
             child.attribute, parent.attribute
         ) and self.is_concept_descendant_of(child.value, parent.value)
 
+    def remove_redundant_ancestors(
+        self, ancestors: Iterable[SCTID]
+    ) -> set[SCTID]:
+        """\
+Remove ancestors that are descendants of other ancestors.
+"""
+        ancestors = set(ancestors)
+        redundant_ancestors = set()
+        for ancestor in ancestors:
+            for other in ancestors:
+                if self.is_concept_descendant_of(
+                    ancestor, other, self_is_parent=False
+                ):
+                    redundant_ancestors.add(ancestor)
+                break
+        return ancestors - redundant_ancestors
+
 
 # Main logic host
 class Bouzyges:
@@ -1616,6 +1639,68 @@ Check if the particular portrait can be a subtype of a parent concept.
             unmatched_concept_relationships -= matched
 
         return not unmatched_concept_relationships
+
+    def update_primitive_anchors(self) -> None:
+        """\
+Update the ancestor anchors for all terms to more precise Primitive
+concepts.
+"""
+        for source_term, portrait in self.portraits.items():
+            i = 0
+            while self.__update_parent_anchors(source_term, portrait):
+                i += 1
+            print(f"Updated {source_term} anchors in {i} iterations.")
+
+    def __update_parent_anchors(
+        self, source_term: str, portrait: SemanticPortrait
+    ) -> bool:
+        """\
+Update the ancestor anchors for one term to more precise primitive concepts.
+Return True if the parent anchors have changed, False otherwise.
+"""
+        new_anchors = set()
+        for anchor in portrait.ancestor_anchors:
+            # Get all primitive descendants
+            primitive_children = self.snowstorm.get_concept_children(
+                anchor,
+                require_property={
+                    "definitionStatus": "PRIMITIVE",
+                },
+            )
+
+            # Filter previously rejected ancestors including meta-ancestors
+            removed = set()
+            for desc in primitive_children:
+                for bad in portrait.rejected_supertypes:
+                    if self.snowstorm.is_concept_descendant_of(desc, bad):
+                        removed.add(desc)
+                        break
+
+            primitive_children = {
+                k: v for k, v in primitive_children.items() if k not in removed
+            }
+
+            # Iterate over descendants and ask to include them
+            # to the new anchors
+            for desc_id, desc_term in primitive_children.items():
+                include = self.prompter.prompt_subsumption(
+                    term=source_term,
+                    prospective_supertype=desc_term,
+                )
+                if include:
+                    new_anchors.add(desc_id)
+                else:
+                    # This will prevent expensive re-queries on descendants
+                    portrait.rejected_supertypes.add(desc_id)
+
+        if not new_anchors:
+            return False
+
+        # Replace the anchor set with the new one
+        new_anchors |= portrait.ancestor_anchors
+        clean = self.snowstorm.remove_redundant_ancestors(new_anchors)
+        portrait.ancestor_anchors = clean
+        return True
 
 
 if __name__ == "__main__":
