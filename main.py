@@ -9,7 +9,7 @@ import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from frozendict import frozendict
-from typing import Iterable
+from typing import Iterable, Mapping
 
 
 # Boilerplate
@@ -59,6 +59,8 @@ Boolean answer constants for prompters for yes/no questions
     def __new__(cls, value: bool):
         return cls.YES if value else cls.NO
 
+
+JsonPrimitive = int | float | str | bool | None
 
 ## Logic constants
 ### MRCM
@@ -359,7 +361,7 @@ Has option to store API parameters for the answer.
     prompt_message: str
     options: frozenset[SCTDescription] | None = None
     escape_hatch: SCTDescription | None = None
-    api_options: frozendict[str, str | int | float | bool] | None = None
+    api_options: frozendict[str, JsonPrimitive] | None = None
 
 
 # Logic classes
@@ -1315,7 +1317,9 @@ do
         return {}
 
     def get_concept_children(
-        self, parent: SCTID
+        self,
+        parent: SCTID,
+        require_property: Mapping[str, JsonPrimitive] | None = None,
     ) -> dict[SCTID, SCTDescription]:
         response = requests.get(
             url=f"{self.url}browser/{self.branch_path}"
@@ -1325,10 +1329,17 @@ do
         if not response.ok:
             raise SnowstormRequestError.from_response(response)
 
-        return {
-            SCTID(child["conceptId"]): SCTDescription(child["pt"]["term"])
-            for child in response.json()
-        }
+        children: dict[SCTID, SCTDescription] = {}
+        for child in response.json():
+            skip: bool = bool(require_property) and all(
+                child.get(k) == v for k, v in require_property.items()
+            )
+            if not skip:
+                id = SCTID(child["conceptId"])
+                term = SCTDescription(child["pt"]["term"])
+                children[id] = term
+
+        return children
 
     def is_concept_descendant_of(
         self,
