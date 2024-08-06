@@ -499,7 +499,7 @@ Abstract class for formatting prompts for the LLM agent.
 
     @abstractmethod
     def form_supertype(
-        cls,
+        self,
         term: str,
         options: Iterable[SCTDescription],
         allow_escape: bool = True,
@@ -513,7 +513,7 @@ for a term.
 
     @abstractmethod
     def form_attr_presence(
-        cls,
+        self,
         term: str,
         attribute: SCTDescription,
         term_context: str | None = None,
@@ -526,7 +526,7 @@ term.
 
     @abstractmethod
     def form_attr_value(
-        cls,
+        self,
         term: str,
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
@@ -1406,11 +1406,17 @@ Remove ancestors that are descendants of other ancestors.
                 if ancestor == other:
                     continue
                 if self.is_concept_descendant_of(
-                    ancestor, other, self_is_parent=False
+                    other, ancestor, self_is_parent=False
                 ):
                     redundant_ancestors.add(ancestor)
                 break
         return ancestors - redundant_ancestors
+
+    def get_concept_ppp(self, concept: SCTID) -> set[SCTID]:
+        """\
+Get a concept's Proximal Primitive Parents
+"""
+        raise NotImplementedError
 
 
 # Main logic host
@@ -1618,11 +1624,15 @@ Check if the particular portrait can be a subtype of a parent concept.
             return False
 
         # Check if any of existing anchors are supertypes of the parent
-        if not any(
-            self.snowstorm.is_concept_descendant_of(parent_predicate, anchor)
-            for anchor in portrait.ancestor_anchors
-        ):
-            return False
+        predicate_ppp: set[SCTID] = self.snowstorm.get_concept_ppp(
+            parent_predicate
+        )
+        for ppp in predicate_ppp:
+            if not any(
+                self.snowstorm.is_concept_descendant_of(ppp, anchor)
+                for anchor in portrait.ancestor_anchors
+            ):
+                return False
 
         # For now, we do not worry about the groups; we may have to once
         # we allow multiple of a same attribute
