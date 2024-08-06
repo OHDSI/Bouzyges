@@ -1642,16 +1642,17 @@ Check if the particular portrait can be a subtype of a parent concept.
 
         return not unmatched_concept_relationships
 
-    def update_primitive_anchors(self) -> None:
+    def update_primitive_anchors(self, source_term: str) -> bool:
         """\
-Update the ancestor anchors for all terms to more precise Primitive
-concepts.
+Update the ancestor anchors for the term to more precise Primitive
+concepts. Return True if any parent anchors have changed, False otherwise.
 """
-        for source_term, portrait in self.portraits.items():
-            i = 0
-            while self.__upd_primitive_anchors(source_term, portrait):
-                i += 1
-            print(f"Updated {source_term} anchors in {i} iterations.")
+        portrait = self.portraits[source_term]
+        i = 0
+        while self.__upd_primitive_anchors(source_term, portrait):
+            i += 1
+        print(f"Updated {source_term} anchors in {i} iterations.")
+        return bool(i)
 
     def __upd_primitive_anchors(
         self, source_term: str, portrait: SemanticPortrait
@@ -1718,16 +1719,17 @@ Return True if the parent anchors have changed, False otherwise.
         portrait.ancestor_anchors |= new_anchors
         return True
 
-    def update_defined_anchors(self) -> None:
+    def update_defined_anchors(self, source_term: str) -> bool:
         """\
-Iterate over all terms and update the ancestor anchors to their most precise
-Fully Defined ancestors.
+Update the ancestor anchors for the term to more precise Fully Defined
+concepts. Return True if any parent anchors have changed, False otherwise.
 """
-        for source_term, portrait in self.portraits.items():
-            i = 0
-            while self.__upd_defined_anchors(source_term, portrait):
-                i += 1
-            print(f"Updated {source_term} anchors in {i} iterations.")
+        portrait = self.portraits[source_term]
+        i = 0
+        while self.__upd_defined_anchors(source_term, portrait):
+            i += 1
+        print(f"Updated {source_term} anchors in {i} iterations.")
+        return bool(i)
 
     def __upd_defined_anchors(
         self, source_term: str, portrait: SemanticPortrait
@@ -1790,16 +1792,14 @@ Return True if the parent anchors have changed, False otherwise.
         portrait.ancestor_anchors |= new_anchors
         return True
 
-    def remove_redundant_ancestors(self) -> None:
+    def remove_redundant_ancestors(self, source_term: str) -> None:
         """\
 Remove redundant ancestors from all portraits.
 """
-        for portrait in self.portraits.values():
-            portrait.ancestor_anchors = (
-                self.snowstorm.remove_redundant_ancestors(
-                    portrait.ancestor_anchors
-                )
-            )
+        portrait = self.portraits[source_term]
+        portrait.ancestor_anchors = self.snowstorm.remove_redundant_ancestors(
+            portrait.ancestor_anchors
+        )
 
 
 if __name__ == "__main__":
@@ -1844,24 +1844,28 @@ if __name__ == "__main__":
         prompter = HumanPrompter(prompt_format=VerbosePromptFormat())
 
     # Test
-    term = "Pyogenic liver abscess"
+    terms = ["Pyogenic liver abscess"]
 
     bouzyges = Bouzyges(
         snowstorm=snowstorm,
         prompter=prompter,
         mrcm_entry_points=domain_entry_points,
-        terms=[term],
+        terms=terms,
     )
 
     bouzyges.populate_attribute_candidates()
     bouzyges.populate_unchecked_attributes()
     bouzyges.update_existing_attr_values()
-    bouzyges.update_primitive_anchors()
-    bouzyges.update_defined_anchors()
-    bouzyges.remove_redundant_ancestors()
+    for term in bouzyges.portraits:
+        primitive_updated = fd_updated = True
+        while primitive_updated or fd_updated:
+            primitive_updated = bouzyges.update_primitive_anchors(term)
+            fd_updated = bouzyges.update_defined_anchors(term)
+            bouzyges.remove_redundant_ancestors(term)
 
     # Print resulting supertypes
     for term, portrait in bouzyges.portraits.items():
         print(term, "supertypes:")
         for anchor in portrait.ancestor_anchors:
-            print(" -", anchor)
+            ancestor = bouzyges.snowstorm.get_concept(anchor)
+            print(" -", ancestor.sctid, ancestor.pt)
