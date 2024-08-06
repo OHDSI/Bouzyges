@@ -153,6 +153,34 @@ class Concept:
             defined=defined,
         )
 
+    @classmethod
+    def from_json(cls, json_data: dict):
+        groups: dict[int, set[AttributeRelationship]] = {}
+        ungrouped: set[AttributeRelationship] = set()
+        for relationship in json_data["relationships"]:
+            attribute = SCTID(relationship["type"]["conceptId"])
+            # Skip 'Is a' relationships here
+            if attribute == IS_A:
+                continue
+            value = SCTID(relationship["target"]["conceptId"])
+            rel = AttributeRelationship(attribute, value)
+            if (group := relationship["groupId"]) == 0:
+                ungrouped.add(rel)
+            else:
+                groups.setdefault(group, set()).add(rel)
+
+        return cls(
+            sctid=SCTID(json_data["conceptId"]),
+            pt=SCTDescription(json_data["pt"]["term"]),
+            fsn=SCTDescription(json_data["fsn"]["term"]),
+            groups=frozenset(
+                AttributeGroup(frozenset(relationships))
+                for relationships in groups.values()
+            ),
+            ungrouped=frozenset(ungrouped),
+            defined=json_data["definitionStatus"] == "FULLY_DEFINED",
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class MRCMDomainRefsetEntry:
@@ -1167,34 +1195,15 @@ class SnowstormAPI:
     def get_concept(self, sctid: SCTID) -> Concept:
         """\
 Get full concept information.
-
-Uses relationships endpoint to get all relationships, including groups.
 """
-        total = None
-        offset = 0
-        step = 100
-        collected_items = []
+        response = requests.get(
+            url=self.url + f"browser/{self.branch_path}/concepts/{sctid}",
+            headers={"Accept": "application/json"},
+        )
+        if not response.ok:
+            raise SnowstormRequestError.from_response(response)
 
-        while total is None or offset < total:
-            response = requests.get(
-                url=self.url + f"{self.branch_path}/relationships",
-                params={
-                    "active": True,
-                    "source": sctid,
-                    "offset": offset,
-                    "limit": step,
-                    "characteristicType": "INFERRED_RELATIONSHIP",
-                },
-                headers={"Accept": "application/json"},
-            )
-            if not response.ok:
-                raise SnowstormRequestError.from_response(response)
-
-            collected_items.extend(response.json()["items"])
-            total = response.json()["total"]
-            offset += step
-
-        return Concept.from_rela_json(collected_items)
+        return Concept.from_json(response.json())
 
     def get_branch_info(self) -> dict:
         response = requests.get(
