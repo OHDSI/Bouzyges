@@ -158,6 +158,9 @@ class Concept:
         groups: dict[int, set[AttributeRelationship]] = {}
         ungrouped: set[AttributeRelationship] = set()
         for relationship in json_data["relationships"]:
+            if not relationship["active"]:
+                continue
+
             attribute = SCTID(relationship["type"]["conceptId"])
             # Skip 'Is a' relationships here
             if attribute == IS_A:
@@ -1388,7 +1391,12 @@ Concept+Subtypes+and+Supertypes
             headers={"Accept": "application/json"},
         )
 
-        out = bool(response.json()["total"])  # Should be 1 or 0
+        try:
+            out = bool(response.json()["total"])  # Should be 1 or 0
+        except:
+            print(response.json())
+            raise
+
         self.__subsumptions_cache[(child, parent)] = out  # Cache the result
         return out
 
@@ -1398,9 +1406,13 @@ Concept+Subtypes+and+Supertypes
         """\
 Check if the child attribute-value pair is a subtype of the parent.
 """
-        return self.is_concept_descendant_of(
+        attribute_is_child = self.is_concept_descendant_of(
             child.attribute, parent.attribute
-        ) and self.is_concept_descendant_of(child.value, parent.value)
+        )
+        value_is_child = self.is_concept_descendant_of(
+            child.value, parent.value
+        )
+        return attribute_is_child and value_is_child
 
     def remove_redundant_ancestors(
         self, ancestors: Iterable[SCTID]
@@ -1445,6 +1457,74 @@ Get a concept's Proximal Primitive Parents
                 out.add(concept)
 
         return out
+
+    def check_inferred_subsumption(
+        self, parent_predicate: SCTID, portrait: SemanticPortrait
+    ) -> bool:
+        """\
+Check if the particular portrait can be a subtype of a parent concept.
+"""
+        parent_concept = self.get_concept(parent_predicate)
+        print(
+            "Checking subsumption for",
+            portrait.source_term,
+            "under",
+            parent_concept.pt,
+        )
+        if not parent_concept.defined:
+            # Subsumption is not possible
+            print("Parent is not defined")
+            return False
+
+        # To be considered eligible as a descendant, all of the predicate's PPP
+        # must be ancestors of at least one anchor
+        unmatched_predicate_ppp: set[SCTID] = self.get_concept_ppp(
+            parent_predicate
+        )
+        for anchor in portrait.ancestor_anchors:
+            matched_ppp: set[SCTID] = set()
+            for ppp in unmatched_predicate_ppp:
+                if self.is_concept_descendant_of(anchor, ppp):
+                    matched_ppp.add(ppp)
+            unmatched_predicate_ppp -= matched_ppp
+
+        if unmatched_predicate_ppp:
+            print(
+                f"Does not satisfy {len(unmatched_predicate_ppp)} "
+                + "PPP constraints"
+            )
+            return False
+
+        # For now, we do not worry about the groups; we may have to once
+        # we allow multiple of a same attribute
+        unmatched_concept_relationships: set[AttributeRelationship] = set()
+        for group in parent_concept.groups:
+            unmatched_concept_relationships |= group.relationships
+        unmatched_concept_relationships |= parent_concept.ungrouped
+
+        for av in portrait.attributes.items():
+            p_rel = AttributeRelationship(*av)
+            matched_attr: set[AttributeRelationship] = set()
+            for c_rel in unmatched_concept_relationships:
+                if self.is_attr_val_descendant_of(p_rel, c_rel):
+                    matched_attr.add(c_rel)
+            unmatched_concept_relationships -= matched_attr
+            if not unmatched_concept_relationships:
+                # Escape early if all relationships are matched
+                break
+
+        print(
+            f"Does not satisfy {len(unmatched_concept_relationships)} "
+            + "attribute constraints"
+            if unmatched_concept_relationships
+            else "Is a subtype"
+        )
+        # FIXME: remove this
+        if parent_predicate == SCTID(128070006):
+            print(unmatched_concept_relationships)
+            print(parent_concept)
+            input()
+        return not unmatched_concept_relationships
 
 
 # Main logic host
@@ -1640,45 +1720,6 @@ Update existing attribute values with the most precise descendant for all terms.
 
                     new_attributes[attribute] = descriptions[value_term]
 
-    def check_inferred_subsumption(
-        self, parent_predicate: SCTID, portrait: SemanticPortrait
-    ) -> bool:
-        """\
-Check if the particular portrait can be a subtype of a parent concept.
-"""
-        parent_concept = self.snowstorm.get_concept(parent_predicate)
-        if not parent_concept.defined:
-            # Subsumption is not possible
-            return False
-
-        # Check if any of existing anchors are supertypes of the parent
-        predicate_ppp: set[SCTID] = self.snowstorm.get_concept_ppp(
-            parent_predicate
-        )
-        for ppp in predicate_ppp:
-            if not any(
-                self.snowstorm.is_concept_descendant_of(ppp, anchor)
-                for anchor in portrait.ancestor_anchors
-            ):
-                return False
-
-        # For now, we do not worry about the groups; we may have to once
-        # we allow multiple of a same attribute
-        unmatched_concept_relationships: set[AttributeRelationship] = set()
-        for group in parent_concept.groups:
-            unmatched_concept_relationships |= group.relationships
-        unmatched_concept_relationships |= parent_concept.ungrouped
-
-        for av in portrait.attributes.items():
-            p_rel = AttributeRelationship(*av)
-            matched = set()
-            for c_rel in unmatched_concept_relationships:
-                if self.snowstorm.is_attr_val_descendant_of(p_rel, c_rel):
-                    matched.add(c_rel)
-            unmatched_concept_relationships -= matched
-
-        return not unmatched_concept_relationships
-
     def update_primitive_anchors(self, source_term: str) -> bool:
         """\
 Update the ancestor anchors for the term to more precise Primitive
@@ -1768,7 +1809,9 @@ concepts. Return True if any parent anchors have changed, False otherwise.
         while self.__update_anchors(
             source_term,
             portrait,
-            lambda *arg: self.check_inferred_subsumption(arg[2], arg[0]),
+            lambda *arg: self.snowstorm.check_inferred_subsumption(
+                arg[2], arg[0]
+            ),
             {"definitionStatus": "FULLY_DEFINED"},
         ):
             i += 1
@@ -1838,6 +1881,12 @@ if __name__ == "__main__":
 
     bouzyges.populate_attribute_candidates()
     bouzyges.populate_unchecked_attributes()
+    print("Attributes:")
+    for term, portrait in bouzyges.portraits.items():
+        print(" -", term, "attributes:")
+        for attribute, value in portrait.attributes.items():
+            print("   -", attribute, value)
+
     bouzyges.update_existing_attr_values()
     for term in bouzyges.portraits:
         primitive_updated = fd_updated = True
