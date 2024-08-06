@@ -1425,7 +1425,26 @@ Remove ancestors that are descendants of other ancestors.
         """\
 Get a concept's Proximal Primitive Parents
 """
-        raise NotImplementedError
+        response = requests.get(
+            url=self.url + f"{self.branch_path}/concepts/{concept}/normal-form",
+            headers={"Accept": "application/json"},
+        )
+        if not response.ok:
+            raise SnowstormRequestError.from_response(response)
+
+        focus_concepts_string = response.json()["expression"].split(" : ")[0]
+        concepts = map(SCTID, focus_concepts_string.split(" + "))
+
+        out = set()
+        for concept in concepts:
+            concept_info = self.get_concept(concept)
+            if concept_info.defined:
+                # Recurse for defined concepts
+                out |= self.get_concept_ppp(concept)
+            else:
+                out.add(concept)
+
+        return out
 
 
 # Main logic host
