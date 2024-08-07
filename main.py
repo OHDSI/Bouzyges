@@ -1,10 +1,10 @@
 import dotenv
-import enum
 import json
 import openai
 import os
 import re
 import requests
+import unittest
 import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -172,6 +172,14 @@ class Concept:
             else:
                 groups.setdefault(group, set()).add(rel)
 
+        match json_data["definitionStatus"]:
+            case "FULLY_DEFINED":
+                defined = True
+            case "PRIMITIVE":
+                defined = False
+            case _:
+                raise (ValueError("Unknown definition status"))
+
         return cls(
             sctid=SCTID(json_data["conceptId"]),
             pt=SCTDescription(json_data["pt"]["term"]),
@@ -181,7 +189,7 @@ class Concept:
                 for relationships in groups.values()
             ),
             ungrouped=frozenset(ungrouped),
-            defined=json_data["definitionStatus"] == "FULLY_DEFINED",
+            defined=defined,
         )
 
 
@@ -321,18 +329,6 @@ class SemanticPortrait:
     """\
 Represents an interactively built semantic portrait of a source concept."""
 
-    class State(enum.Enum):
-        # Completed state
-        COMPLETED = 0  # Ready for use
-        # Incomplete states
-        MISSING_SUPERTYPES = 1  # No supertypes selected
-        MISSING_ATTRIBUTES = 2  # No attributes selected
-        MISSING_ATTRIBUTE_VALUES = 3  # Not all attributes have values
-        # Interim states
-        ATTRIBUTES_FILLED = 4  # All attributes have values or are rejected
-        PRIMITIVE_EXHAUSTED = 5  # Proximal primitive anchors are set
-        CLASSIFIED = 6  # Defined supertypes are set through classification
-
     def __init__(self, term: str, context: str | None = None) -> None:
         self.source_term: str = term
         self.context: Iterable[str] | None = context
@@ -343,22 +339,7 @@ Represents an interactively built semantic portrait of a source concept."""
         self.rejected_attributes: set[SCTID] = set()
         self.rejected_supertypes: set[SCTID] = set()
 
-        self.state = self.State.MISSING_SUPERTYPES
         self.relevant_constraints: dict[SCTID, AttributeConstraints] = {}
-
-    def check_state(self) -> None:
-        if not self.ancestor_anchors:
-            self.state = self.State.MISSING_SUPERTYPES
-        elif not any(self.rejected_attributes) and not any(self.attributes):
-            self.state = self.State.MISSING_ATTRIBUTES
-        elif self.unchecked_attributes:
-            self.state = self.State.MISSING_ATTRIBUTE_VALUES
-        else:
-            # Portrait does not know if it or it's
-            # attributes have unresolved subtypes; Nor if
-            # classification is complete.
-            # It will report self as completed
-            self.state = self.State.COMPLETED
 
 
 ## Exceptions
@@ -1771,6 +1752,48 @@ otherwise.
         print("New ancestors:", new_anchors - portrait.ancestor_anchors)
         portrait.ancestor_anchors |= new_anchors
         return True
+
+
+# Tests
+class BooleanAnswerTest(unittest.TestCase):
+    def test_new(self):
+        self.assertEqual(BooleanAnswer(True), BooleanAnswer.YES)
+        self.assertEqual(BooleanAnswer(False), BooleanAnswer.NO)
+
+
+class SnowstormAPITest(unittest.TestCase):
+    def setUp(self):
+        dotenv.load_dotenv()
+        snowstorm_endpoint = os.getenv("SNOWSTORM_ENDPOINT")
+        if not snowstorm_endpoint:
+            raise ValueError(
+                "SNOWSTORM_ENDPOINT environment variable is " "not set"
+            )
+        self.snowstorm = SnowstormAPI(URL(snowstorm_endpoint))
+
+    def test_subsumption(self):
+        self.assertTrue(
+            self.snowstorm.is_concept_descendant_of(
+                SCTID(68843000), SCTID(64572001)
+            )
+        )
+        self.assertFalse(
+            self.snowstorm.is_concept_descendant_of(
+                SCTID(362981000), SCTID(64572001)
+            )
+        )
+        self.assertTrue(
+            self.snowstorm.is_concept_descendant_of(
+                SCTID(64572001), SCTID(64572001)
+            )
+        )
+
+    def test_subsumption_self(self):
+        self.assertFalse(
+            self.snowstorm.is_concept_descendant_of(
+                SCTID(64572001), SCTID(64572001), self_is_parent=False
+            )
+        )
 
 
 if __name__ == "__main__":
