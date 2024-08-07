@@ -1504,15 +1504,11 @@ Check if the particular portrait can be a subtype of a parent concept.
                 # Escape early if all relationships are matched
                 break
 
-        if unmatched_concept_relationships:
-            print(
-                f"Does not satisfy {len(unmatched_concept_relationships)} "
-                f"attribute constraints"
-            )
-        else:
-            print("All constraints are satisfied")
-            return True
+        if unmatched := len(unmatched_concept_relationships):
+            print(f"Does not satisfy {unmatched} attribute constraints")
+            return False
 
+        print("All constraints are satisfied")
         return True
 
 
