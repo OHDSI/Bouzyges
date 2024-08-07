@@ -9,7 +9,7 @@ import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from frozendict import frozendict
-from typing import Callable, Iterable, Mapping
+from typing import Iterable, Mapping
 
 
 # Boilerplate
@@ -217,8 +217,8 @@ more useful information for domain modelling, but it is not yet well explored.
             sctid=SCTID(json_data["referencedComponent"]["conceptId"]),
             term=SCTDescription(json_data["referencedComponent"]["pt"]["term"]),
             domain_template=ECLExpression(
-                # Use pre-coordination: stricter
-                af["domainTemplateForPre-coordination"]
+                # Use precoordination: stricter
+                af["domainTemplateForPrecoordination"]
             ),
             domain_constraint=ECLExpression(af["domainConstraint"]),
             guide_link=URL(af["guideURL"]),
@@ -1149,7 +1149,8 @@ class SnowstormAPI:
         self.url: URL = url
         self.branch_path: BranchPath = self.get_main_branch_path()
 
-        # Subsumption checks are numerous and repetitive, so cache them
+        # Cache repetitive queries
+        self.__concepts_cache: dict[SCTID, Concept] = {}
         self.__subsumptions_cache: dict[tuple[SCTID, SCTID], bool] = {}
 
     def _get(self, *args, **kwargs) -> requests.Response:
@@ -1214,8 +1215,12 @@ Wrapper for requests.get that collects all items from a paginated response.
         """\
 Get full concept information.
 """
+        if sctid in self.__concepts_cache:
+            return self.__concepts_cache[sctid]
         response = self._get(f"browser/{self.branch_path}/concepts/{sctid}")
-        return Concept.from_json(response.json())
+        concept = Concept.from_json(response.json())
+        self.__concepts_cache[sctid] = concept
+        return concept
 
     def get_branch_info(self) -> dict:
         response = self._get(f"branches/{self.branch_path}")
@@ -1389,16 +1394,13 @@ Check if the child attribute-value pair is a subtype of the parent.
         )
         return attribute_is_child and value_is_child
 
-    def remove_redundant_ancestors(
-        self, ancestors: Iterable[SCTID]
-    ) -> set[SCTID]:
+    def remove_redundant_ancestors(self, portrait: SemanticPortrait) -> None:
         """\
 Remove ancestors that are descendants of other ancestors.
 """
-        ancestors = set(ancestors)
         redundant_ancestors = set()
-        for ancestor in ancestors:
-            for other in ancestors:
+        for ancestor in portrait.ancestor_anchors:
+            for other in portrait.ancestor_anchors:
                 if ancestor == other:
                     continue
                 if self.is_concept_descendant_of(
@@ -1406,7 +1408,7 @@ Remove ancestors that are descendants of other ancestors.
                 ):
                     redundant_ancestors.add(ancestor)
                 break
-        return ancestors - redundant_ancestors
+        portrait.ancestor_anchors -= redundant_ancestors
 
     def get_concept_ppp(self, concept: SCTID) -> set[SCTID]:
         """\
@@ -1503,7 +1505,6 @@ Main logic host for the Bouzyges system.
         self,
         snowstorm: SnowstormAPI,
         prompter: Prompter,
-        mrcm_entry_points: Iterable[MRCMDomainRefsetEntry],
         terms: Iterable[str],
         contexts: Iterable[str] | None = None,
     ):
@@ -1518,8 +1519,19 @@ Main logic host for the Bouzyges system.
                 for term, context in zip(terms, contexts)
             }
 
+        print("Snowstorm Version:" + snowstorm.get_version())
+        print("Using branch path:", snowstorm.branch_path)
+
         # Load MRCM entries
-        self.mrcm_entries = mrcm_entry_points
+        print("MRCM Domain Reference Set entries:")
+        domain_entries = snowstorm.get_mrcm_domain_reference_set_entries()
+        print("Total entries:", len(domain_entries))
+        self.mrcm_entries = [
+            MRCMDomainRefsetEntry.from_json(entry)
+            for entry in domain_entries
+            if SCTID(entry["referencedComponent"]["conceptId"])
+            in WHITELISTED_SUPERTYPES
+        ]
 
         for entry in self.mrcm_entries:
             print(" -", entry.term + ":")
@@ -1686,47 +1698,30 @@ Update existing attribute values with the most precise descendant for all terms.
 
                     new_attributes[attribute] = descriptions[value_term]
 
-    def update_primitive_anchors(self, source_term: str) -> bool:
-        """\
-Update the ancestor anchors for the term to more precise Primitive
-concepts. Return True if any parent anchors have changed, False otherwise.
-"""
+    def update_anchors(self, source_term: str) -> bool:
         portrait = self.portraits[source_term]
         i = 0
         ancestors_changed = True
         while ancestors_changed:
-            ancestors_changed = self.__update_anchors(
-                source_term,
-                portrait,
-                lambda *arg: self.prompter.prompt_subsumption(arg[1], arg[3]),
-                {"definitionStatus": "PRIMITIVE"},
-            )
+            ancestors_changed = self.__update_anchor(portrait)
             i += ancestors_changed
         print(f"Updated {source_term} anchors in {i} iterations.")
         return i > 1
 
-    def __update_anchors(
+    def __update_anchor(
         self,
-        source_term: str,
         portrait: SemanticPortrait,
-        fn: Callable[[SemanticPortrait, str, SCTID, SCTDescription], bool],
-        property: Mapping[str, JsonPrimitive],
     ) -> bool:
         """\
-Update the ancestor anchors for one term to more precise children. Takes a
-function that checks subsumption. Return True if the parent anchors have
-changed, False otherwise.
+Update the ancestor anchors for one term to more precise children. Performs a
+single iteration. Return True if the parent anchors have changed, False
+otherwise.
 """
         new_anchors = set()
         for anchor in portrait.ancestor_anchors:
-            # Get all descendants matching the property
-            children = self.snowstorm.get_concept_children(
-                anchor, require_property=property
-            )
-            print(
-                f"Filtering {len(children)} children of {anchor}, "
-                f"with property {json.dumps(property)}"
-            )
+            # Get all immediate descendants
+            children = self.snowstorm.get_concept_children(anchor)
+            print(f"Filtering {len(children)} children of {anchor}")
 
             # Filter previously rejected ancestors including meta-ancestors
             removed = set()
@@ -1751,14 +1746,24 @@ changed, False otherwise.
             # Iterate over descendants and ask LLM/Snowstorm if to include them
             # to the new anchors
             for child_id, child_term in children.items():
-                include = fn(portrait, source_term, child_id, child_term)
+                if self.snowstorm.get_concept(child_id).defined:
+                    include = self.snowstorm.check_inferred_subsumption(
+                        child_id, portrait
+                    )
+                else:
+                    include = self.prompter.prompt_subsumption(
+                        term=portrait.source_term,
+                        prospective_supertype=child_term,
+                        term_context=portrait.context,
+                    )
+
                 if include:
                     new_anchors.add(child_id)
                 else:
                     # This will prevent expensive re-queries on descendants
                     portrait.rejected_supertypes.add(child_id)
 
-        if not new_anchors - portrait.ancestor_anchors:
+        if not new_anchors:
             print("No new ancestors found")
             return False
 
@@ -1766,27 +1771,6 @@ changed, False otherwise.
         print("New ancestors:", new_anchors - portrait.ancestor_anchors)
         portrait.ancestor_anchors |= new_anchors
         return True
-
-    def update_defined_anchors(self, source_term: str) -> bool:
-        """\
-Update the ancestor anchors for the term to more precise Fully Defined
-concepts. Return True if any parent anchors have changed, False otherwise.
-"""
-        portrait = self.portraits[source_term]
-        i = 0
-        ancestors_changed = True
-        while ancestors_changed:
-            ancestors_changed = self.__update_anchors(
-                source_term,
-                portrait,
-                lambda *arg: self.snowstorm.check_inferred_subsumption(
-                    arg[2], arg[0]
-                ),
-                {"definitionStatus": "FULLY_DEFINED"},
-            )
-            i += ancestors_changed
-        print(f"Updated {source_term} anchors in {i} iterations.")
-        return i > 1
 
 
 if __name__ == "__main__":
@@ -1797,19 +1781,6 @@ if __name__ == "__main__":
     if not snowstorm_endpoint:
         raise ValueError("SNOWSTORM_ENDPOINT environment variable is not set")
     snowstorm = SnowstormAPI(URL(snowstorm_endpoint))
-
-    print("Snowstorm Version:" + snowstorm.get_version())
-    print("Using branch path:", snowstorm.branch_path)
-
-    print("MRCM Domain Reference Set entries:")
-    domain_entries = snowstorm.get_mrcm_domain_reference_set_entries()
-    print("Total entries:", len(domain_entries))
-    domain_entry_points = [
-        MRCMDomainRefsetEntry.from_json(entry)
-        for entry in domain_entries
-        if SCTID(entry["referencedComponent"]["conceptId"])
-        in WHITELISTED_SUPERTYPES
-    ]
 
     # If API key exists in the environment, use it
     prompter: Prompter
@@ -1831,13 +1802,10 @@ if __name__ == "__main__":
         prompter = HumanPrompter(prompt_format=VerbosePromptFormat())
 
     # Test
-    terms = ["Pyogenic liver abscess"]
-
     bouzyges = Bouzyges(
         snowstorm=snowstorm,
         prompter=prompter,
-        mrcm_entry_points=domain_entry_points,
-        terms=terms,
+        terms=["Pyogenic liver abscess"],
     )
 
     bouzyges.populate_attribute_candidates()
@@ -1850,15 +1818,16 @@ if __name__ == "__main__":
 
     bouzyges.update_existing_attr_values()
     for term, portrait in bouzyges.portraits.items():
-        primitive_updated = fd_updated = True
-        while primitive_updated or fd_updated:
-            primitive_updated = bouzyges.update_primitive_anchors(term)
-            fd_updated = bouzyges.update_defined_anchors(term)
-        portrait.ancestor_anchors = (
-            bouzyges.snowstorm.remove_redundant_ancestors(
-                portrait.ancestor_anchors
-            )
-        )
+        changes_made = updated = True
+
+        while changes_made:
+            cycles = 0
+            while updated:
+                updated = bouzyges.update_anchors(term)
+                cycles += updated
+            changes_made = bool(cycles)
+
+            bouzyges.snowstorm.remove_redundant_ancestors(portrait)
 
     # Print resulting supertypes
     for term, portrait in bouzyges.portraits.items():
