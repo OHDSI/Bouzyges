@@ -218,7 +218,7 @@ more useful information for domain modelling, but it is not yet well explored.
             term=SCTDescription(json_data["referencedComponent"]["pt"]["term"]),
             domain_template=ECLExpression(
                 # Use pre-coordination: stricter
-                af["domainTemplateForPrecoordination"]
+                af["domainTemplateForPre-coordination"]
             ),
             domain_constraint=ECLExpression(af["domainConstraint"]),
             guide_link=URL(af["guideURL"]),
@@ -741,8 +741,8 @@ Interfaces prompts to the LLM agent and parses answers.
         if use_cache:
             self.cache = PromptCache(sqlite3.connect("prompt_cache.db"))
 
+    @staticmethod
     def unwrap_class_answer(
-        self,
         answer: str,
         options: Iterable[SCTDescription] = (),
         escape_hatch: SCTDescription | None = EscapeHatch.WORD,
@@ -801,8 +801,8 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
 
         return max(indices, key=lambda k: indices.get(k, -1))
 
+    @staticmethod
     def unwrap_bool_answer(
-        self,
         answer: str,
         yes: str = BooleanAnswer.YES,
         no: str = BooleanAnswer.NO,
@@ -889,9 +889,7 @@ Check if the API is available.
 
 class HumanPrompter(Prompter):
     """\
-A test prompter that interacts with a meatbag to get answers.
-
-TODO: Interface with a shock collar.
+A test prompter that interacts with a human to get answers.
 """
 
     _model_id = "human"
@@ -921,6 +919,9 @@ TODO: Interface with a shock collar.
                 return answer
 
         # Get the answer
+        return self._prompt_class_answer(allow_escape, options, prompt)
+
+    def _prompt_class_answer(self, allow_escape, options, prompt):
         while True:
             print(prompt.prompt_message)
             brain_answer = input("Answer: ").strip()
@@ -957,6 +958,9 @@ TODO: Interface with a shock collar.
                 )
                 return answer
 
+        return self._prompt_bool_answer(prompt)
+
+    def _prompt_bool_answer(self, prompt):
         while True:
             print(prompt.prompt_message)
             brain_answer = input("Answer: ").strip()
@@ -1001,21 +1005,7 @@ TODO: Interface with a shock collar.
                 )
                 return answer
 
-        while True:
-            print(prompt.prompt_message)
-            brain_answer = input("Answer: ").strip()
-            try:
-                answer = self.unwrap_class_answer(
-                    brain_answer,
-                    options,
-                    EscapeHatch.WORD if allow_escape else None,
-                )
-                self.cache_remember(prompt, brain_answer)
-                return answer
-
-            except PrompterError as e:
-                print("Error:", e)
-                print("Please, provide an answer in the requested format.")
+        return self._prompt_class_answer(allow_escape, options, prompt)
 
     def prompt_subsumption(
         self,
@@ -1038,16 +1028,7 @@ TODO: Interface with a shock collar.
                 )
                 return answer
 
-        while True:
-            print(prompt.prompt_message)
-            brain_answer = input("Answer: ").strip()
-            try:
-                answer = self.unwrap_bool_answer(brain_answer)
-                self.cache_remember(prompt, brain_answer)
-                return answer
-            except PrompterError as e:
-                print("Error:", e)
-                print("Please, provide an answer in the requested format.")
+        return self._prompt_bool_answer(prompt)
 
     def ping(self) -> bool:
         input("Hey, are you here? (Press Enter) ")
@@ -1467,7 +1448,7 @@ Check if the particular portrait can be a subtype of a parent concept.
             print("Parent is not defined")
             return False
 
-        # To be considered eligible as a descendant, all of the predicate's PPP
+        # To be considered eligible as a descendant, all the predicate's PPP
         # must be ancestors of at least one anchor
         unmatched_predicate_ppp: set[SCTID] = self.get_concept_ppp(
             parent_predicate
@@ -1712,15 +1693,17 @@ concepts. Return True if any parent anchors have changed, False otherwise.
 """
         portrait = self.portraits[source_term]
         i = 0
-        while self.__update_anchors(
-            source_term,
-            portrait,
-            lambda *arg: self.prompter.prompt_subsumption(arg[1], arg[3]),
-            {"definitionStatus": "PRIMITIVE"},
-        ):
-            i += 1
+        ancestors_changed = True
+        while ancestors_changed:
+            ancestors_changed = self.__update_anchors(
+                source_term,
+                portrait,
+                lambda *arg: self.prompter.prompt_subsumption(arg[1], arg[3]),
+                {"definitionStatus": "PRIMITIVE"},
+            )
+            i += ancestors_changed
         print(f"Updated {source_term} anchors in {i} iterations.")
-        return bool(i)
+        return i > 1
 
     def __update_anchors(
         self,
@@ -1791,26 +1774,19 @@ concepts. Return True if any parent anchors have changed, False otherwise.
 """
         portrait = self.portraits[source_term]
         i = 0
-        while self.__update_anchors(
-            source_term,
-            portrait,
-            lambda *arg: self.snowstorm.check_inferred_subsumption(
-                arg[2], arg[0]
-            ),
-            {"definitionStatus": "FULLY_DEFINED"},
-        ):
-            i += 1
+        ancestors_changed = True
+        while ancestors_changed:
+            ancestors_changed = self.__update_anchors(
+                source_term,
+                portrait,
+                lambda *arg: self.snowstorm.check_inferred_subsumption(
+                    arg[2], arg[0]
+                ),
+                {"definitionStatus": "FULLY_DEFINED"},
+            )
+            i += ancestors_changed
         print(f"Updated {source_term} anchors in {i} iterations.")
-        return bool(i)
-
-    def remove_redundant_ancestors(self, source_term: str) -> None:
-        """\
-Remove redundant ancestors from all portraits.
-"""
-        portrait = self.portraits[source_term]
-        portrait.ancestor_anchors = self.snowstorm.remove_redundant_ancestors(
-            portrait.ancestor_anchors
-        )
+        return i > 1
 
 
 if __name__ == "__main__":
@@ -1822,7 +1798,7 @@ if __name__ == "__main__":
         raise ValueError("SNOWSTORM_ENDPOINT environment variable is not set")
     snowstorm = SnowstormAPI(URL(snowstorm_endpoint))
 
-    print("Snowstorm Verson:" + snowstorm.get_version())
+    print("Snowstorm Version:" + snowstorm.get_version())
     print("Using branch path:", snowstorm.branch_path)
 
     print("MRCM Domain Reference Set entries:")
@@ -1873,12 +1849,16 @@ if __name__ == "__main__":
             print("   -", attribute, value)
 
     bouzyges.update_existing_attr_values()
-    for term in bouzyges.portraits:
+    for term, portrait in bouzyges.portraits.items():
         primitive_updated = fd_updated = True
         while primitive_updated or fd_updated:
             primitive_updated = bouzyges.update_primitive_anchors(term)
             fd_updated = bouzyges.update_defined_anchors(term)
-        bouzyges.remove_redundant_ancestors(term)
+        portrait.ancestor_anchors = (
+            bouzyges.snowstorm.remove_redundant_ancestors(
+                portrait.ancestor_anchors
+            )
+        )
 
     # Print resulting supertypes
     for term, portrait in bouzyges.portraits.items():

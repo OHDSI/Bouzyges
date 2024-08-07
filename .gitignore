@@ -2,6 +2,10 @@
 # JetBrains IDE
 .idea/
 
+# Scalene profiler
+profile.json
+profile.html
+
 # SQLite database files
 *.sqlite3
 *.sqlite3-journal
