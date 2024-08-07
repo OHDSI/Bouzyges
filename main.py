@@ -1228,15 +1228,6 @@ Get full concept information.
             if SCTID(attr["id"]) != IS_A  # Exclude hierarchy
         }
 
-    @staticmethod
-    def print_attribute_model_hierarchy(amh: dict) -> None:
-        def print_node(node, indent):
-            print("  " * indent, f"{node['conceptId']}:", node["pt"]["term"])
-            for child in node.get("children", ()):
-                print_node(child, indent + 1)
-
-        print_node(amh, 0)
-
     def get_mrcm_domain_reference_set_entries(
         self,
     ) -> list[dict]:
@@ -1679,6 +1670,8 @@ Update existing attribute values with the most precise descendant for all terms.
 
                     new_attributes[attribute] = descriptions[value_term]
 
+            portrait.attributes.update(new_attributes)
+
     def update_anchors(self, source_term: str) -> bool:
         portrait = self.portraits[source_term]
         i = 0
@@ -1833,13 +1826,13 @@ if __name__ == "__main__":
 
     bouzyges.populate_attribute_candidates()
     bouzyges.populate_unchecked_attributes()
+    bouzyges.update_existing_attr_values()
     print("Attributes:")
     for term, portrait in bouzyges.portraits.items():
         print(" -", term, "attributes:")
         for attribute, value in portrait.attributes.items():
             print("   -", attribute, value)
 
-    bouzyges.update_existing_attr_values()
     for term, portrait in bouzyges.portraits.items():
         changes_made = updated = True
 
