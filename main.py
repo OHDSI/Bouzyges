@@ -1162,6 +1162,7 @@ A prompter that interfaces with the OpenAI API using Azure.
 class SnowstormAPI:
     TARGET_CODESYSTEM = "SNOMEDCT"
     CONTENT_TYPE_PREFERENCE = "NEW_PRECOORDINATED", "PRECOORDINATED", "ALL"
+    PAGINATION_STEP = 100
 
     def __init__(self, url: URL):
         self.url: URL = url
@@ -1170,21 +1171,54 @@ class SnowstormAPI:
         # Subsumption checks are numerous and repetitive, so cache them
         self.__subsumptions_cache: dict[tuple[SCTID, SCTID], bool] = {}
 
-    def get_version(self) -> str:
-        response = requests.get(
-            self.url + "version", headers={"Accept": "application/json"}
-        )
+    def _get(self, *args, **kwargs) -> requests.Response:
+        """\
+Wrapper for requests.get that prepends known url and
+raises an exception on non-200 responses.
+"""
+        # Include the known url
+        if "url" not in kwargs:
+            args = (self.url + args[0], *args[1:])
+        else:
+            kwargs["url"] = self.url + kwargs["url"]
+
+        kwargs["headers"] = kwargs.get("headers", {})
+        kwargs["headers"]["Accept"] = "application/json"
+
+        response = requests.get(*args, **kwargs)
         if not response.ok:
             raise SnowstormRequestError.from_response(response)
+        return response
+
+    def _get_collect(self, *args, **kwargs) -> list[dict]:
+        """\
+Wrapper for requests.get that collects all items from a paginated response.
+"""
+        total = None
+        offset = 0
+        step = self.PAGINATION_STEP
+        collected_items = []
+
+        while total is None or offset < total:
+            kwargs["params"] = kwargs.get("params", {})
+            kwargs["params"]["offset"] = offset
+            kwargs["params"]["limit"] = step
+
+            response = self._get(*args, **kwargs)
+
+            collected_items.extend(response.json()["items"])
+            total = response.json()["total"]
+            offset += step
+
+        return collected_items
+
+    def get_version(self) -> str:
+        response = self._get("version")
         return response.json()["version"]
 
     def get_main_branch_path(self) -> BranchPath:
         # Get codesystems and look for a target
-        response = requests.get(
-            self.url + "codesystems", headers={"Accept": "application/json"}
-        )
-        if not response.ok:
-            raise SnowstormRequestError.from_response(response)
+        response = self._get("codesystems")
 
         for codesystem in response.json()["items"]:
             if codesystem["shortName"] == self.TARGET_CODESYSTEM:
@@ -1199,23 +1233,11 @@ class SnowstormAPI:
         """\
 Get full concept information.
 """
-        response = requests.get(
-            url=self.url + f"browser/{self.branch_path}/concepts/{sctid}",
-            headers={"Accept": "application/json"},
-        )
-        if not response.ok:
-            raise SnowstormRequestError.from_response(response)
-
+        response = self._get(f"browser/{self.branch_path}/concepts/{sctid}")
         return Concept.from_json(response.json())
 
     def get_branch_info(self) -> dict:
-        response = requests.get(
-            self.url + f"branches/{self.branch_path}",
-            headers={"Accept": "application/json"},
-        )
-        if not response.ok:
-            raise SnowstormRequestError.from_response(response)
-
+        response = self._get(f"branches/{self.branch_path}")
         return response.json()
 
     def get_attribute_suggestions(
@@ -1228,13 +1250,10 @@ Get full concept information.
             "contentType": "ALL",
         }
 
-        response = requests.get(
-            url=self.url + "mrcm/" + self.branch_path + "/domain-attributes",
+        response = self._get(
+            url="mrcm/" + self.branch_path + "/domain-attributes",
             params=params,
-            headers={"Accept": "application/json"},
         )
-        if not response.ok:
-            raise SnowstormRequestError.from_response(response)
 
         return {
             SCTID(attr["id"]): AttributeConstraints.from_json(attr)
@@ -1254,29 +1273,13 @@ Get full concept information.
     def get_mrcm_domain_reference_set_entries(
         self,
     ) -> list[dict]:
-        total = None
-        offset = 0
-        step = 100
-        collected_items = []
-
-        while total is None or offset < total:
-            response = requests.get(
-                url=self.url + f"/{self.branch_path}/members",
-                params={
-                    "referenceSet": MRCM_DOMAIN_REFERENCE_SET_ECL,
-                    "active": True,
-                    "offset": offset,
-                    "limit": step,
-                },
-                headers={"Accept": "application/json"},
-            )
-            if not response.ok:
-                raise SnowstormRequestError.from_response(response)
-
-            collected_items.extend(response.json()["items"])
-            total = response.json()["total"]
-            offset += step
-
+        collected_items = self._get_collect(
+            url=f"/{self.branch_path}/members",
+            params={
+                "referenceSet": MRCM_DOMAIN_REFERENCE_SET_ECL,
+                "active": True,
+            },
+        )
         return collected_items
 
     @staticmethod
@@ -1343,13 +1346,9 @@ do
         parent: SCTID,
         require_property: Mapping[str, JsonPrimitive] | None = None,
     ) -> dict[SCTID, SCTDescription]:
-        response = requests.get(
-            url=f"{self.url}browser/{self.branch_path}"
-            + f"/concepts/{parent}/children",
-            headers={"Accept": "application/json", "form": "inferred"},
+        response = self._get(
+            url=f"browser/{self.branch_path}" + f"/concepts/{parent}/children",
         )
-        if not response.ok:
-            raise SnowstormRequestError.from_response(response)
 
         children: dict[SCTID, SCTDescription] = {}
         for child in response.json():
@@ -1382,20 +1381,15 @@ Concept+Subtypes+and+Supertypes
         if (child, parent) in self.__subsumptions_cache:
             return self.__subsumptions_cache[(child, parent)]
 
-        response = requests.get(
-            url=self.url + f"{self.branch_path}/concepts/",
+        response = self._get(
+            url=f"{self.branch_path}/concepts/",
             params={
                 "ecl": f"<{parent}",  # Is a subtype of
                 "conceptIds": [child],  # limit to known child
             },
-            headers={"Accept": "application/json"},
         )
 
-        try:
-            out = bool(response.json()["total"])  # Should be 1 or 0
-        except:
-            print(response.json())
-            raise
+        out = bool(response.json()["total"])  # Should be 1 or 0
 
         self.__subsumptions_cache[(child, parent)] = out  # Cache the result
         return out
@@ -1437,12 +1431,9 @@ Remove ancestors that are descendants of other ancestors.
         """\
 Get a concept's Proximal Primitive Parents
 """
-        response = requests.get(
-            url=self.url + f"{self.branch_path}/concepts/{concept}/normal-form",
-            headers={"Accept": "application/json"},
+        response = self._get(
+            f"{self.branch_path}/concepts/{concept}/normal-form",
         )
-        if not response.ok:
-            raise SnowstormRequestError.from_response(response)
 
         focus_concepts_string = response.json()["expression"].split(" : ")[0]
         concepts = map(SCTID, focus_concepts_string.split(" + "))
@@ -1513,18 +1504,16 @@ Check if the particular portrait can be a subtype of a parent concept.
                 # Escape early if all relationships are matched
                 break
 
-        print(
-            f"Does not satisfy {len(unmatched_concept_relationships)} "
-            + "attribute constraints"
-            if unmatched_concept_relationships
-            else "Is a subtype"
-        )
-        # FIXME: remove this
-        if parent_predicate == SCTID(128070006):
-            print(unmatched_concept_relationships)
-            print(parent_concept)
-            input()
-        return not unmatched_concept_relationships
+        if unmatched_concept_relationships:
+            print(
+                f"Does not satisfy {len(unmatched_concept_relationships)} "
+                f"attribute constraints"
+            )
+        else:
+            print("All constraints are satisfied")
+            return True
+
+        return True
 
 
 # Main logic host
