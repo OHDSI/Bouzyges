@@ -1424,7 +1424,7 @@ manually/with LLM.
         # To be considered eligible as a descendant, all the predicate's PPP
         # must be ancestors of at least one anchor
         unmatched_predicate_ppp: set[SCTID] = self.get_concept_ppp(
-            parent_predicate
+            parent_predicate.sctid
         )
         for anchor in portrait.ancestor_anchors:
             matched_ppp: set[SCTID] = set()
@@ -1708,7 +1708,6 @@ otherwise.
                 ):
                     removed.add(child)
                     portrait.rejected_supertypes.add(child)
-                    break
 
             children = {
                 k: v
@@ -1735,10 +1734,13 @@ otherwise.
 
                 # Primitive concepts must be confirmed by the LLM
                 primitive = not child_concept.defined
+                term_context = (
+                    "; ".join(portrait.context) if portrait.context else None
+                )
                 if primitive and not self.prompter.prompt_subsumption(
                     term=portrait.source_term,
                     prospective_supertype=child_term,
-                    term_context=portrait.context,
+                    term_context=term_context,
                 ):
                     portrait.rejected_supertypes.add(child_id)
                     continue
