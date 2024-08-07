@@ -1,7 +1,9 @@
+import cProfile
 import dotenv
 import json
 import openai
 import os
+import pstats
 import re
 import requests
 import unittest
@@ -10,6 +12,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from frozendict import frozendict
 from typing import Iterable, Mapping
+
+# Parameters
+PROFILING = True
 
 
 # Boilerplate
@@ -1756,6 +1761,36 @@ otherwise.
         portrait.ancestor_anchors |= new_anchors
         return True
 
+    def run(self):
+        """Main routine"""
+        self.populate_attribute_candidates()
+        self.populate_unchecked_attributes()
+        self.update_existing_attr_values()
+        print("Attributes:")
+        for term, portrait in self.portraits.items():
+            print(" -", term, "attributes:")
+            for attribute, value in portrait.attributes.items():
+                print("   -", attribute, value)
+
+        for term, portrait in self.portraits.items():
+            changes_made = updated = True
+
+            while changes_made:
+                cycles = 0
+                while updated:
+                    updated = self.update_anchors(term)
+                    cycles += updated
+                changes_made = bool(cycles)
+
+                self.snowstorm.remove_redundant_ancestors(portrait)
+
+        # Print resulting supertypes
+        for term, portrait in self.portraits.items():
+            print(term, "supertypes:")
+            for anchor in portrait.ancestor_anchors:
+                ancestor = self.snowstorm.get_concept(anchor)
+                print(" -", ancestor.sctid, ancestor.pt)
+
 
 # Tests
 class BooleanAnswerTest(unittest.TestCase):
@@ -1834,30 +1869,11 @@ if __name__ == "__main__":
         terms=["Pyogenic liver abscess"],
     )
 
-    bouzyges.populate_attribute_candidates()
-    bouzyges.populate_unchecked_attributes()
-    bouzyges.update_existing_attr_values()
-    print("Attributes:")
-    for term, portrait in bouzyges.portraits.items():
-        print(" -", term, "attributes:")
-        for attribute, value in portrait.attributes.items():
-            print("   -", attribute, value)
-
-    for term, portrait in bouzyges.portraits.items():
-        changes_made = updated = True
-
-        while changes_made:
-            cycles = 0
-            while updated:
-                updated = bouzyges.update_anchors(term)
-                cycles += updated
-            changes_made = bool(cycles)
-
-            bouzyges.snowstorm.remove_redundant_ancestors(portrait)
-
-    # Print resulting supertypes
-    for term, portrait in bouzyges.portraits.items():
-        print(term, "supertypes:")
-        for anchor in portrait.ancestor_anchors:
-            ancestor = bouzyges.snowstorm.get_concept(anchor)
-            print(" -", ancestor.sctid, ancestor.pt)
+    if PROFILING:
+        with cProfile.Profile() as prof:
+            bouzyges.run()
+        stats = pstats.Stats(prof)
+        stats.sort_stats(pstats.SortKey.TIME)
+        stats.dump_stats("stats.prof")
+    else:
+        bouzyges.run()

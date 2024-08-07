@@ -6,6 +6,9 @@
 profile.json
 profile.html
 
+# cProfile profiler
+stats.prof
+
 # SQLite database files
 *.sqlite3
 *.sqlite3-journal
