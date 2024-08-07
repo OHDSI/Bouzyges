@@ -1405,22 +1405,21 @@ Get a concept's Proximal Primitive Parents
         return out
 
     def check_inferred_subsumption(
-        self, parent_predicate: SCTID, portrait: SemanticPortrait
+        self, parent_predicate: Concept, portrait: SemanticPortrait
     ) -> bool:
         """\
 Check if the particular portrait can be a subtype of a parent concept.
+
+Note that subsumption is checked for concepts regardless of definition status;
+Primitive concepts will report subsumption as True, but it needs to be confirmed
+manually/with LLM.
 """
-        parent_concept = self.get_concept(parent_predicate)
         print(
             "Checking subsumption for",
             portrait.source_term,
             "under",
-            parent_concept.pt,
+            parent_predicate.pt,
         )
-        if not parent_concept.defined:
-            # Subsumption is not possible
-            print("Parent is not defined")
-            return False
 
         # To be considered eligible as a descendant, all the predicate's PPP
         # must be ancestors of at least one anchor
@@ -1444,9 +1443,9 @@ Check if the particular portrait can be a subtype of a parent concept.
         # For now, we do not worry about the groups; we may have to once
         # we allow multiple of a same attribute
         unmatched_concept_relationships: set[AttributeRelationship] = set()
-        for group in parent_concept.groups:
+        for group in parent_predicate.groups:
             unmatched_concept_relationships |= group.relationships
-        unmatched_concept_relationships |= parent_concept.ungrouped
+        unmatched_concept_relationships |= parent_predicate.ungrouped
 
         for av in portrait.attributes.items():
             p_rel = AttributeRelationship(*av)
@@ -1463,7 +1462,10 @@ Check if the particular portrait can be a subtype of a parent concept.
             print(f"Does not satisfy {unmatched} attribute constraints")
             return False
 
-        print("All constraints are satisfied")
+        print(
+            "All constraints are satisfied",
+            "but concept is primitive!" * (not parent_predicate.defined),
+        )
         return True
 
 
@@ -1720,22 +1722,28 @@ otherwise.
             # Iterate over descendants and ask LLM/Snowstorm if to include them
             # to the new anchors
             for child_id, child_term in children.items():
-                if self.snowstorm.get_concept(child_id).defined:
-                    include = self.snowstorm.check_inferred_subsumption(
-                        child_id, portrait
-                    )
-                else:
-                    include = self.prompter.prompt_subsumption(
-                        term=portrait.source_term,
-                        prospective_supertype=child_term,
-                        term_context=portrait.context,
-                    )
+                child_concept = self.snowstorm.get_concept(child_id)
 
-                if include:
-                    new_anchors.add(child_id)
-                else:
+                supertype: bool = self.snowstorm.check_inferred_subsumption(
+                    child_concept, portrait
+                )
+
+                if not supertype:
                     # This will prevent expensive re-queries on descendants
                     portrait.rejected_supertypes.add(child_id)
+                    continue
+
+                # Primitive concepts must be confirmed by the LLM
+                primitive = not child_concept.defined
+                if primitive and not self.prompter.prompt_subsumption(
+                    term=portrait.source_term,
+                    prospective_supertype=child_term,
+                    term_context=portrait.context,
+                ):
+                    portrait.rejected_supertypes.add(child_id)
+                    continue
+
+                new_anchors.add(child_id)
 
         if not new_anchors:
             print("No new ancestors found")
