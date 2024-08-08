@@ -1,8 +1,8 @@
 import cProfile
 import datetime
-import dotenv
 import itertools
 import json
+import logging
 import openai
 import os
 import pstats
@@ -14,9 +14,19 @@ from dataclasses import dataclass
 from frozendict import frozendict
 from typing import Iterable, Mapping
 
+# Optional imports
+## dotenv
+try:
+    import dotenv
+except ImportError:
+    logging.info("dotenv not found; relying on explicit environment variables")
+    dotenv = None
+
 
 # Parameters
+# TODO: use sys.argv for these
 PROFILING = False
+logging.basicConfig(level=logging.DEBUG)
 
 
 # Boilerplate
@@ -354,6 +364,10 @@ class ProfileMark(Exception):
     """Interrupts flow of the program at arbitrary point for profiling"""
 
 
+class BouzygesError(Exception):
+    """Base class for Bouzyges errors."""
+
+
 class SnowstormAPIError(Exception):
     """Raised when the Snowstorm API returns a bad response."""
 
@@ -367,11 +381,11 @@ class SnowstormRequestError(SnowstormAPIError):
 
     @classmethod
     def from_response(cls, response):
-        print("Request:")
-        print(response.request.method, response.request.url)
+        logging.error("Request:")
+        logging.error(response.request.method, response.request.url)
         if response:
-            print("Response:")
-            print(json.dumps(response.json(), indent=2))
+            logging.error("Response:")
+            logging.error(json.dumps(response.json(), indent=2))
         return cls(
             f"Snowstorm API returned {response.status_code} status code",
             response,
@@ -840,11 +854,13 @@ Prompt the model to choose the best matching proximal ancestor for a term.
                     options,
                     EscapeHatch.WORD if allow_escape else None,
                 )
-                print(f"From cache: {answer} is a supertype of {term}")
+                logging.info(f"From cache: {answer} is a supertype of {term}")
                 return answer
 
         # Get the answer
-        return self._prompt_class_answer(allow_escape, options, prompt)
+        answer = self._prompt_class_answer(allow_escape, options, prompt)
+        logging.info(f"Agent answer: {answer} is a supertype of {term}")
+        return answer
 
     def prompt_attr_presence(
         self,
@@ -860,13 +876,18 @@ Prompt the model to choose the best matching proximal ancestor for a term.
         if self.cache:
             if cached_answer := self.cache.get(self._model_id, prompt):
                 answer = self.unwrap_bool_answer(cached_answer)
-                print(
+                logging.info(
                     f"From cache: The attribute '{attribute}' is "
                     f"{'present' if answer else 'absent'} in '{term}'"
                 )
                 return answer
 
-        return self._prompt_bool_answer(prompt)
+        answer = self._prompt_bool_answer(prompt)
+        logging.info(
+            f"Agent answer: The attribute '{attribute}' is "
+            f"{'present' if answer else 'absent'} in '{term}'"
+        )
+        return answer
 
     def prompt_attr_value(
         self,
@@ -898,13 +919,18 @@ Prompt the model to choose the value of an attribute in a term.
                     options,
                     EscapeHatch.WORD if allow_escape else None,
                 )
-                print(
+                logging.info(
                     f"From cache: The value of the attribute '{attribute}' in "
                     f"'{term}' is '{answer}'"
                 )
                 return answer
 
-        return self._prompt_class_answer(allow_escape, options, prompt)
+        answer = self._prompt_class_answer(allow_escape, options, prompt)
+        logging.info(
+            f"Agent answer: The value of the attribute '{attribute}' in "
+            f"'{term}' is '{answer}'"
+        )
+        return answer
 
     def prompt_subsumption(
         self,
@@ -926,14 +952,20 @@ Fully Defined concepts.
         if self.cache:
             if cached_answer := self.cache.get(self._model_id, prompt):
                 answer = self.unwrap_bool_answer(cached_answer)
-                print(
+                logging.info(
                     f"From cache: The term '{term}' is",
                     "a subtype" if answer else "not a subtype",
                     f"of '{prospective_supertype}'",
                 )
                 return answer
 
-        return self._prompt_bool_answer(prompt)
+        answer = self._prompt_bool_answer(prompt)
+        logging.info(
+            f"Agent answer: The term '{term}' is",
+            "a subtype" if answer else "not a subtype",
+            f"of '{prospective_supertype}'",
+        )
+        return answer
 
     def cache_remember(self, prompt: Prompt, answer: str) -> None:
         if self.cache:
@@ -1025,7 +1057,7 @@ A prompter that interfaces with the OpenAI API using Azure.
     ):
         super().__init__(*args, **kwargs)
 
-        print("Initializing the Azure API client...")
+        logging.info("Initializing the Azure API client...")
         self._client = openai.AzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
@@ -1035,26 +1067,26 @@ A prompter that interfaces with the OpenAI API using Azure.
         self._model_id = model or self.DEFAULT_MODEL
 
     def ping(self) -> bool:
-        print("Pinging the Azure API...")
+        logging.info("Pinging the Azure API...")
         # Ping by retrieving the list of models
         headers = {"api-key": self._client.api_key}
         try:
             models = self._client.models.list(extra_headers=headers, timeout=5)
         except openai.APITimeoutError:
-            print("Connection timed out")
+            logging.warning("Connection timed out")
             return False
         response: dict = models.model_dump()
         success = response.get("data", []) != []
         if success:
-            print("API is available")
+            logging.info("API is available")
             if self._model_id not in [obj["id"] for obj in response["data"]]:
-                print(
+                logging.warning(
                     f"But '{self._model_id}' is not present in the API response!"
                 )
                 return False
             return True
 
-        print("API is not available")
+        logging.warning("API is not available")
         return False
 
     def _prompt_bool_answer(self, prompt: Prompt) -> bool:
@@ -1220,7 +1252,7 @@ do
                 failure = True
 
             if failure:
-                print(f"{rc} is not a simple disjunction of SCTIDs!")
+                logging.error(f"{rc} is not a simple disjunction of SCTIDs!")
                 raise NotImplementedError
 
         # If there is more than one available parent, remove the root
@@ -1243,7 +1275,7 @@ do
                     return self._range_constraint_to_parents(r.range_constraint)
 
         # No range of allowed content types found!
-        print(f"No range constraint found for {attribute}")
+        logging.warning(f"No range constraint found for {attribute}")
         return {}
 
     def get_concept_children(
@@ -1399,7 +1431,7 @@ Note that subsumption is checked for concepts regardless of definition status;
 Primitive concepts will report subsumption as True, but it needs to be confirmed
 manually/with LLM.
 """
-        print(
+        logging.debug(
             "Checking subsumption for",
             portrait.source_term,
             "under",
@@ -1419,7 +1451,7 @@ manually/with LLM.
             unmatched_predicate_ppp -= matched_ppp
 
         if unmatched_predicate_ppp:
-            print(
+            logging.debug(
                 f"Does not satisfy {len(unmatched_predicate_ppp)} "
                 + "PPP constraints"
             )
@@ -1444,10 +1476,10 @@ manually/with LLM.
                 break
 
         if unmatched := len(unmatched_concept_relationships):
-            print(f"Does not satisfy {unmatched} attribute constraints")
+            logging.debug(f"Does not satisfy {unmatched} attribute constraints")
             return False
 
-        print(
+        logging.debug(
             "All constraints are satisfied",
             "but concept is primitive!" * (not parent_predicate.defined),
         )
@@ -1478,13 +1510,13 @@ Main logic host for the Bouzyges system.
                 for term, context in zip(terms, contexts)
             }
 
-        print("Snowstorm Version:" + snowstorm.get_version())
-        print("Using branch path:", snowstorm.branch_path)
+        logging.info("Snowstorm Version:" + snowstorm.get_version())
+        logging.info("Using branch path:", snowstorm.branch_path)
 
         # Load MRCM entries
-        print("MRCM Domain Reference Set entries:")
+        logging.info("MRCM Domain Reference Set entries:")
         domain_entries = snowstorm.get_mrcm_domain_reference_set_entries()
-        print("Total entries:", len(domain_entries))
+        logging.info("Total entries:", len(domain_entries))
         self.mrcm_entries = [
             MRCMDomainRefsetEntry.from_json(entry)
             for entry in domain_entries
@@ -1493,10 +1525,9 @@ Main logic host for the Bouzyges system.
         ]
 
         for entry in self.mrcm_entries:
-            print(" -", entry.term + ":")
-            print("    -", entry.domain_constraint)
-            print("    -", entry.guide_link)
-            print()
+            logging.info(" -", entry.term + ":")
+            logging.info("    -", entry.domain_constraint)
+            logging.info("    -", entry.guide_link)
 
         # Initialize supertypes
         self.initialize_supertypes()
@@ -1507,7 +1538,7 @@ Initialize supertypes for all terms to start building portraits.
 """
         for source_term, portrait in self.portraits.items():
             if portrait.ancestor_anchors:
-                raise ValueError(
+                raise BouzygesError(
                     "Should not happen: ancestor anchors are set, "
                     "and yet initialize_supertypes is called"
                 )
@@ -1526,12 +1557,12 @@ Initialize supertypes for all terms to start building portraits.
             match supertype_term:
                 case SCTDescription(answer_term):
                     supertype = supertypes_decode[answer_term]
-                    print("Assuming", source_term, "is", answer_term)
+                    logging.info("Assuming", source_term, "is", answer_term)
                     portrait.ancestor_anchors.add(supertype)
                 case _:
-                    raise ValueError(
-                        "Should not happen: "
-                        "did the prompter inject the escape hatch?"
+                    raise BouzygesError(
+                        "Should not happen: null-like response from prompter; "
+                        "did the Prompter inject the escape hatch?"
                     )
 
     def populate_attribute_candidates(self) -> None:
@@ -1544,9 +1575,9 @@ Initialize supertypes for all terms to start building portraits.
             for attribute in portrait.rejected_attributes:
                 attributes.pop(attribute, None)
 
-            print("Possible attributes for:", term)
+            logging.debug("Possible attributes for:", term)
             for sctid, attribute in attributes.items():
-                print(" - ", sctid, attribute.pt)
+                logging.debug(" - ", sctid, attribute.pt)
 
             # Confirm the attributes
             for attribute in attributes.values():
@@ -1557,8 +1588,7 @@ Initialize supertypes for all terms to start building portraits.
                     if portrait.context
                     else None,
                 )
-                print(
-                    " -",
+                logging.info(
                     attribute.sctid,
                     attribute.pt + ":",
                     "Present" if accept else "Not present",
@@ -1577,21 +1607,21 @@ Initialize supertypes for all terms to start building portraits.
         for portrait in self.portraits.values():
             rejected = set()
             for attribute in portrait.unchecked_attributes:
-                print("Attribute:", attribute)
+                logging.debug("Attribute:", attribute)
                 # Get possible attribute values
                 values_options = self.snowstorm.get_attribute_values(
                     portrait, attribute
                 )
-                print("Values:", values_options)
+                logging.debug("Values:", values_options)
 
                 if not values_options:
                     # No valid values for this attribute and parent combination
                     rejected.add(attribute)
                     continue
                 else:
-                    print("Possible values for:", attribute)
+                    logging.info("Possible values for:", attribute)
                     for value in values_options:
-                        print(" -", value)
+                        logging.info(" -", value)
 
                 # Prompt for the value
                 value_term = self.prompter.prompt_attr_value(
@@ -1666,7 +1696,7 @@ Update existing attribute values with the most precise descendant for all terms.
         while ancestors_changed:
             ancestors_changed = self.__update_anchor(portrait)
             i += ancestors_changed
-        print(f"Updated {source_term} anchors in {i} iterations.")
+        logging.info(f"Updated {source_term} anchors in {i} iterations.")
         return i > 1
 
     def __update_anchor(
@@ -1682,7 +1712,7 @@ otherwise.
         for anchor in portrait.ancestor_anchors:
             # Get all immediate descendants
             children = self.snowstorm.get_concept_children(anchor)
-            print(f"Filtering {len(children)} children of {anchor}")
+            logging.debug(f"Filtering {len(children)} children of {anchor}")
 
             # Remove verbatim known ancestors
             for known_ancestor in portrait.ancestor_anchors:
@@ -1701,7 +1731,7 @@ otherwise.
             for child in set(children) - remaining:
                 del children[child]
 
-            print(f"Filtered to {len(children)}")
+            logging.debug(f"Filtered to {len(children)}")
 
             # Iterate over descendants and ask LLM/Snowstorm if to include them
             # to the new anchors
@@ -1733,26 +1763,27 @@ otherwise.
                 new_anchors.add(child_id)
 
         if not new_anchors:
-            print("No new ancestors found")
+            logging.debug("No new ancestors found")
             return False
 
         # Update the anchor set with the new one
-        print("New ancestors:", new_anchors - portrait.ancestor_anchors)
+        logging.debug("New ancestors:", new_anchors - portrait.ancestor_anchors)
         portrait.ancestor_anchors |= new_anchors
         return True
 
     def run(self):
         start_time = datetime.datetime.now()
+        logging.info("Started at:", start_time)
 
         """Main routine"""
         self.populate_attribute_candidates()
         self.populate_unchecked_attributes()
         self.update_existing_attr_values()
-        print("Attributes:")
+        logging.info("Attributes:")
         for term, portrait in self.portraits.items():
-            print(" -", term, "attributes:")
+            logging.info(" -", term, "attributes:")
             for attribute, value in portrait.attributes.items():
-                print("   -", attribute, value)
+                logging.info("   -", attribute, value)
 
         for term, portrait in self.portraits.items():
             changes_made = updated = True
@@ -1773,13 +1804,15 @@ otherwise.
                 ancestor = self.snowstorm.get_concept(anchor)
                 print(" -", ancestor.sctid, ancestor.pt)
 
-        print("Started at:", start_time)
-        print("Time taken:", datetime.datetime.now() - start_time)
+        logging.info("Started at:", start_time)
+        logging.info("Time taken:", datetime.datetime.now() - start_time)
 
 
 if __name__ == "__main__":
     # Load environment variables for API access
-    dotenv.load_dotenv()
+    if dotenv is not None:
+        logging.info("Loading environment variables from .env")
+        dotenv.load_dotenv()
 
     snowstorm_endpoint = os.getenv("SNOWSTORM_ENDPOINT")
     if not snowstorm_endpoint:
@@ -1799,10 +1832,10 @@ if __name__ == "__main__":
         )
 
         if not prompter.ping():
-            print("Azure API is not available, using human prompter.")
+            logging.warn("Azure API is not available, using human prompter.")
             prompter = HumanPrompter(prompt_format=VerbosePromptFormat())
     else:
-        print("No Azure API key found, using human prompter.")
+        logging.warn("No Azure API key found, using human prompter.")
         prompter = HumanPrompter(prompt_format=VerbosePromptFormat())
 
     # Test
