@@ -12,14 +12,17 @@ import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from frozendict import frozendict
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Literal, Mapping, TypeVar
 
 # Optional imports
 ## dotenv
 try:
     import dotenv
 except ImportError:
-    logging.info("dotenv not found; relying on explicit environment variables")
+    logging.info(
+        "python-dotenv package not installed. "
+        "Relying on explicit environment variables"
+    )
     dotenv = None
 
 
@@ -78,6 +81,9 @@ Boolean answer constants for prompters for yes/no questions
 
 
 JsonPrimitive = int | float | str | bool | None
+OpenAIPromptRole = Literal["user"] | Literal["system"] | Literal["assisstant"]
+OpenAIMessages = tuple[frozendict[OpenAIPromptRole, str]]
+T = TypeVar("T")
 
 ## Logic constants
 ### MRCM
@@ -405,7 +411,7 @@ Represents a prompt for the LLM agent to answer.
 Has option to store API parameters for the answer.
 """
 
-    prompt_message: str
+    prompt_message: str | OpenAIMessages
     options: frozenset[SCTDescription] | None = None
     escape_hatch: SCTDescription | None = None
     api_options: frozendict[str, JsonPrimitive] | None = None
@@ -425,18 +431,32 @@ tokens.
         self.connection = db_connection
         self.table_name = "prompt"
 
+        # Create the table if it does not exist in DB
+        table_exists_query = """\
+            SELECT name
+            FROM sqlite_master
+            WHERE type='table' AND name=?;
+        """
+        exists = self.connection.execute(table_exists_query, [self.table_name])
+        if not exists.fetchone():
+            with open("init_prompt_cache.sql") as f:
+                self.connection.executescript(f.read())
+
     def get(self, model: str, prompt: Prompt) -> str | None:
         """\
 Get the answer from the cache for specified model.
 """
-        query = f"""
+        query = """
             SELECT response
-            FROM {self.table_name}
+            FROM ?
             WHERE
                 model = ? AND
-                prompt = ? AND
+                prompt_text = ? AND
+                prompt_is_json = ? AND
                 api_options
         """
+
+        # Shape the prompt text
         if prompt.api_options:
             api_options = json.dumps(
                 {
@@ -448,10 +468,16 @@ Get the answer from the cache for specified model.
         else:
             api_options = None
             query += " is ? ;"
+
+        if prompt_is_json := isinstance(prompt.prompt_message, list):
+            prompt_text = json.dumps(prompt.prompt_message)
+        else:
+            prompt_text = prompt.prompt_message
+
         cursor = self.connection.cursor()
         cursor.execute(
             query,
-            (model, prompt.prompt_message, api_options),
+            (self.table_name, model, prompt_text, prompt_is_json, api_options),
         )
         if answer := cursor.fetchone():
             return answer[0]
@@ -461,9 +487,11 @@ Get the answer from the cache for specified model.
         """\
 Remember the answer for the prompt for the specified model.
 """
-        query = f"""
-            INSERT INTO {self.table_name} (model, prompt, response, api_options)
-            VALUES (?, ?, ?, ?)
+        query = """
+            INSERT INTO ? (
+                model, prompt_text, prompt_is_json, response, api_options
+            )
+            VALUES (?, ?, ?, ?, ?)
         """
         if prompt.api_options:
             api_options = json.dumps(
@@ -475,9 +503,23 @@ Remember the answer for the prompt for the specified model.
         else:
             api_options = None
         cursor = self.connection.cursor()
+
+        # Shape the prompt text
+        if prompt_is_json := isinstance(prompt.prompt_message, list):
+            prompt_text = json.dumps(prompt.prompt_message)
+        else:
+            prompt_text = prompt.prompt_message
+
         cursor.execute(
             query,
-            (model, prompt.prompt_message, response, api_options),
+            (
+                self.table_name,
+                model,
+                prompt_text,
+                prompt_is_json,
+                response,
+                api_options,
+            ),
         )
         self.connection.commit()
 
@@ -1046,6 +1088,8 @@ A prompter that interfaces with the OpenAI API using Azure.
     DEFAULT_MODEL = "gpt-35-turbo"
     DEFAULT_VERSION = "2023-07-01-preview"
 
+    ATTEMPTS_BEFORE_FAIL = 3
+
     def __init__(
         self,
         *args,
@@ -1090,12 +1134,49 @@ A prompter that interfaces with the OpenAI API using Azure.
         return False
 
     def _prompt_bool_answer(self, prompt: Prompt) -> bool:
-        _ = prompt
-        raise NotImplementedError
+        return self._prompt_answer(prompt, self.unwrap_bool_answer)
 
     def _prompt_class_answer(self, allow_escape, options, prompt):
-        _ = allow_escape, options, prompt
-        raise NotImplementedError
+        return self._prompt_answer(
+            prompt,
+            lambda x: self.unwrap_class_answer(
+                x, options, EscapeHatch.WORD if allow_escape else None
+            ),
+        )
+
+    def _prompt_answer(self, prompt: Prompt, parser: Callable[[str], T]) -> T:
+        logging.info("Prompting the Azure API for a boolean answer...")
+
+        for attempt in range(self.ATTEMPTS_BEFORE_FAIL + 1):
+            logging.debug("Prompt message", prompt.prompt_message)
+            if attempt > 0:
+                logging.warning("Retrying...")
+
+            try:
+                brain_answer = self._client.completions.create(
+                    model=self._model_id,
+                    prompt=prompt.prompt_message,  # type: ignore
+                    # Prefer answers with same tokens
+                    presence_penalty=-0.5,
+                )
+            except openai.APIError as e:
+                logging.error("API error:", e)
+                if attempt == self.ATTEMPTS_BEFORE_FAIL:
+                    raise PrompterError("Failed to get a response from the API")
+                continue
+
+            try:
+                answer = parser(brain_answer.choices[0].text)
+                self.cache_remember(prompt, brain_answer.choices[0].text)
+                return answer
+            except PrompterError as e:
+                logging.error("Error:", e)
+                if attempt == self.ATTEMPTS_BEFORE_FAIL:
+                    raise PrompterError("Failed to parse the answer")
+                continue
+
+        # Unreachable
+        raise PrompterError("Unreachable code reached?!")
 
 
 class SnowstormAPI:
