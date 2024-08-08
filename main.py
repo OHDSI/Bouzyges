@@ -1172,12 +1172,13 @@ raises an exception on non-200 responses.
         if not response.ok:
             raise SnowstormRequestError.from_response(response)
 
-        import datetime
+        if PROFILING:
+            import datetime
 
-        time = datetime.datetime.now() - self.__start_time
-        if time.total_seconds() >= 10 * 60:
-            print("Profile this")
-            raise ProfileMark
+            time = datetime.datetime.now() - self.__start_time
+            if time.total_seconds() >= 10 * 60:
+                print("Profile this")
+                raise ProfileMark
 
         return response
 
