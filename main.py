@@ -81,7 +81,7 @@ Boolean answer constants for prompters for yes/no questions
 
 
 JsonPrimitive = int | float | str | bool | None
-OpenAIPromptRole = Literal["user"] | Literal["system"] | Literal["assisstant"]
+OpenAIPromptRole = Literal["user", "system", "assisstant"]
 OpenAIMessages = tuple[frozendict[OpenAIPromptRole, str]]
 T = TypeVar("T")
 
@@ -640,7 +640,7 @@ class VerbosePromptFormat(PromptFormat):
     """\
 Default simple verbose prompt format for the LLM agent.
 
-Contains no API options, intended for human prompters.
+Contains no API options and only string prompts, intended for human prompters.
     """
 
     def _form_shared_header(self, allow_escape) -> str:
@@ -770,6 +770,149 @@ Contains no API options, intended for human prompters.
  - {BooleanAnswer.NO}: The term is not a subtype of the concept.
 """
         return Prompt(prompt, frozenset((BooleanAnswer.YES, BooleanAnswer.NO)))
+
+
+class OpenAIPromptFormat(PromptFormat):
+    """\
+Default prompt format for the OpenAI API.
+
+Outputs prompts as JSONs and contains sensible API option defaults.
+"""
+
+    default_api_options = frozendict(
+        # We want responses to use tokens we provide
+        presence_penalty=-0.5,
+    )
+    _UnfinishedPrompt = list[dict[OpenAIPromptRole, str]]
+
+    def __finalise_prompt(
+        self,
+        prompt: _UnfinishedPrompt,
+        options: frozenset[SCTDescription] | None,
+        escape_hatch: SCTDescription | None = None,
+    ) -> Prompt:
+        history = []
+        for message in prompt:
+            for role, text in message.items():
+                history.append(frozendict({"role": role, "content": text}))
+
+        return Prompt(
+            tuple(history),
+            options,
+            escape_hatch,
+            self.default_api_options,
+        )
+
+    def _form_shared_history(self, allow_escape) -> _UnfinishedPrompt:
+        prompt = [
+            {
+                "system": "You are " + self.ROLE + ".",
+            },
+            {
+                "system": "Your assignment is " + self.TASK + ".",
+            },
+            {
+                "system": "Please note that " + self.REQUIREMENTS + ".",
+            },
+            {
+                "system": "Your exact instructions are:",
+            },
+            {
+                "system": self.INSTRUCTIONS
+                + (allow_escape * self.ESCAPE_INSTRUCTIONS),
+            },
+        ]
+        return prompt
+
+    def form_supertype(
+        self,
+        term: str,
+        options: Iterable[SCTDescription],
+        allow_escape: bool = True,
+        term_context: str | None = None,
+        options_context: dict[SCTDescription, str] | None = None,
+    ) -> Prompt:
+        prompt = self._form_shared_history(allow_escape)
+        prompt.append(
+            {
+                "user": (
+                    f"Given the term '{term}', what is the closest supertype or "
+                    "exact equivalent of it's meaning from the following options?"
+                )
+            }
+        )
+        if term_context:
+            prompt.append(
+                {
+                    "user": (
+                        "Following information is provided about the term: "
+                        + term_context
+                    )
+                }
+            )
+
+        options_text = "Options, in no particular order:\n"
+        for option in sorted(options):  # Sort for cache consistency
+            options_text += f" - {self.wrap_term(option)}"
+            if options_context and option in options_context:
+                options_text += f": {options_context[option]}"
+            options_text += "\n"
+        # Remind of the escape hatch, just in case
+        if allow_escape:
+            options_text += f" - {EscapeHatch.WORD}: " "None of the above\n"
+
+        prompt.append({"user": options_text})
+
+        return self.__finalise_prompt(
+            prompt,
+            frozenset(options),
+            EscapeHatch.WORD if allow_escape else None,
+        )
+
+    def form_attr_presence(
+        self,
+        term: str,
+        attribute: SCTDescription,
+        term_context: str | None = None,
+        attribute_context: str | None = None,
+    ) -> Prompt:
+        prompt = self._form_shared_history(allow_escape=False)
+        prompt.append(
+            {
+                "user": f"Is the attribute '{attribute}' present in the term '{term}'?"
+            }
+        )
+        if term_context:
+            prompt.append(
+                {
+                    "user": (
+                        "Following information is provided about the term: "
+                        + term_context
+                    )
+                }
+            )
+        if attribute_context:
+            prompt.append(
+                {
+                    "user": (
+                        "Attribute is defined as follows: " + attribute_context
+                    )
+                }
+            )
+
+        prompt.append(
+            {
+                "user": f"""Options are:
+ - {BooleanAnswer.YES}: The attribute is guaranteed present.
+ - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
+"""
+            }
+        )
+
+        return self.__finalise_prompt(
+            prompt,
+            frozenset((BooleanAnswer.YES, BooleanAnswer.NO)),
+        )
 
 
 ## Logic prompter classes
@@ -1157,7 +1300,7 @@ A prompter that interfaces with the OpenAI API using Azure.
                     model=self._model_id,
                     prompt=prompt.prompt_message,  # type: ignore
                     # Prefer answers with same tokens
-                    presence_penalty=-0.5,
+                    **(prompt.api_options or {}),
                 )
             except openai.APIError as e:
                 logging.error("API error:", e)
