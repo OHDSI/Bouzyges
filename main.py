@@ -1,12 +1,12 @@
 import cProfile
 import dotenv
+import itertools
 import json
 import openai
 import os
 import pstats
 import re
 import requests
-import unittest
 import sqlite3
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -366,7 +366,11 @@ class SnowstormRequestError(SnowstormAPIError):
 
     @classmethod
     def from_response(cls, response):
-        print(json.dumps(response.json(), indent=2))
+        print("Request:")
+        print(response.request.method, response.request.url)
+        if response:
+            print("Response:")
+            print(json.dumps(response.json(), indent=2))
         return cls(
             f"Snowstorm API returned {response.status_code} status code",
             response,
@@ -1135,8 +1139,14 @@ class SnowstormAPI:
     TARGET_CODESYSTEM = "SNOMEDCT"
     CONTENT_TYPE_PREFERENCE = "NEW_PRECOORDINATED", "PRECOORDINATED", "ALL"
     PAGINATION_STEP = 100
+    MAX_BAD_PARENT_QUERY = 32
 
     def __init__(self, url: URL):
+        # Debug
+        import datetime
+
+        self.__start_time = datetime.datetime.now()
+
         self.url: URL = url
         self.branch_path: BranchPath = self.get_main_branch_path()
 
@@ -1161,9 +1171,17 @@ raises an exception on non-200 responses.
         response = requests.get(*args, **kwargs)
         if not response.ok:
             raise SnowstormRequestError.from_response(response)
+
+        import datetime
+
+        time = datetime.datetime.now() - self.__start_time
+        if time.total_seconds() >= 10 * 60:
+            print("Profile this")
+            raise ProfileMark
+
         return response
 
-    def _get_collect(self, *args, **kwargs) -> list[dict]:
+    def _get_collect(self, *args, **kwargs) -> list:
         """\
 Wrapper for requests.get that collects all items from a paginated response.
 """
@@ -1242,7 +1260,7 @@ Get full concept information.
         self,
     ) -> list[dict]:
         collected_items = self._get_collect(
-            url=f"/{self.branch_path}/members",
+            url=f"{self.branch_path}/members",
             params={
                 "referenceSet": MRCM_DOMAIN_REFERENCE_SET_ECL,
                 "active": True,
@@ -1360,6 +1378,45 @@ Concept+Subtypes+and+Supertypes
         out = bool(response.json()["total"])  # Should be 1 or 0
 
         self.__subsumptions_cache[(child, parent)] = out  # Cache the result
+        return out
+
+    def filter_bad_descendants(
+        self, children: Iterable[SCTID], bad_parents: Iterable[SCTID]
+    ) -> set[SCTID]:
+        """\
+Filter out children that are descendants of bad parents and return the rest.
+"""
+        if not bad_parents:
+            return set(children)
+
+        # First, remove the direct matches and cached hits
+        out = set(children) - set(bad_parents)
+        known_bad = set()
+        for child, bad_parent in itertools.product(out, bad_parents):
+            if self.__subsumptions_cache.get((child, bad_parent)):
+                known_bad.add(child)
+        out -= known_bad
+
+        if not out:
+            return out
+
+        # Batch request, because Snowstorm hates long urls
+        for bad_batch in itertools.batched(
+            bad_parents, self.MAX_BAD_PARENT_QUERY
+        ):
+            expression = " OR ".join(f"<{b_p}" for b_p in sorted(bad_batch))
+            actual_children = self._get_collect(
+                url=f"{self.branch_path}/concepts/",
+                params={
+                    "ecl": expression,
+                    "returnIdOnly": True,
+                    "conceptIds": sorted(out),  # limit to known children
+                },
+            )
+            out -= set(SCTID(c) for c in actual_children)
+            if not out:
+                break
+
         return out
 
     def is_attr_val_descendant_of(
@@ -1709,22 +1766,22 @@ otherwise.
             children = self.snowstorm.get_concept_children(anchor)
             print(f"Filtering {len(children)} children of {anchor}")
 
-            # Filter previously rejected ancestors including meta-ancestors
-            removed = set()
-            for child in children:
-                if any(
-                    self.snowstorm.is_concept_descendant_of(child, bad)
-                    for bad in portrait.rejected_supertypes
-                ):
-                    removed.add(child)
-                    portrait.rejected_supertypes.add(child)
+            # Remove verbatim known ancestors
+            for known_ancestor in portrait.ancestor_anchors:
+                children.pop(known_ancestor, None)
 
-            children = {
-                k: v
-                for k, v in children.items()
-                # Do not revisit denied children or known ancestors
-                if k not in removed | portrait.ancestor_anchors
-            }
+            # Filter previously rejected ancestors including meta-ancestors
+            remaining = self.snowstorm.filter_bad_descendants(
+                children=children, bad_parents=portrait.rejected_supertypes
+            )
+
+            # Save the rejected children as rejected ancestors
+            portrait.rejected_supertypes.update(
+                child for child in children if child not in remaining
+            )
+
+            for child in set(children) - remaining:
+                del children[child]
 
             print(f"Filtered to {len(children)}")
 
@@ -1795,48 +1852,6 @@ otherwise.
             for anchor in portrait.ancestor_anchors:
                 ancestor = self.snowstorm.get_concept(anchor)
                 print(" -", ancestor.sctid, ancestor.pt)
-
-
-# Tests
-class BooleanAnswerTest(unittest.TestCase):
-    def test_new(self):
-        self.assertEqual(BooleanAnswer(True), BooleanAnswer.YES)
-        self.assertEqual(BooleanAnswer(False), BooleanAnswer.NO)
-
-
-class SnowstormAPITest(unittest.TestCase):
-    def setUp(self):
-        dotenv.load_dotenv()
-        snowstorm_endpoint = os.getenv("SNOWSTORM_ENDPOINT")
-        if not snowstorm_endpoint:
-            raise ValueError(
-                "SNOWSTORM_ENDPOINT environment variable is " "not set"
-            )
-        self.snowstorm = SnowstormAPI(URL(snowstorm_endpoint))
-
-    def test_subsumption(self):
-        self.assertTrue(
-            self.snowstorm.is_concept_descendant_of(
-                SCTID(68843000), SCTID(64572001)
-            )
-        )
-        self.assertFalse(
-            self.snowstorm.is_concept_descendant_of(
-                SCTID(362981000), SCTID(64572001)
-            )
-        )
-        self.assertTrue(
-            self.snowstorm.is_concept_descendant_of(
-                SCTID(64572001), SCTID(64572001)
-            )
-        )
-
-    def test_subsumption_self(self):
-        self.assertFalse(
-            self.snowstorm.is_concept_descendant_of(
-                SCTID(64572001), SCTID(64572001), self_is_parent=False
-            )
-        )
 
 
 if __name__ == "__main__":
