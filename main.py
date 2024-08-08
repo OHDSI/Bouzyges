@@ -1280,8 +1280,8 @@ Returns True if the child is a descendant of the parent, and False otherwise.
 See: https://confluence.ihtsdotools.org/display/DOCTSG/4.5+Get+and+Test+\
 Concept+Subtypes+and+Supertypes
 """
-        if self_is_parent and child == parent:
-            return True
+        if child == parent:
+            return self_is_parent
 
         if (child, parent) in self.__subsumptions_cache:
             return self.__subsumptions_cache[(child, parent)]
@@ -1358,14 +1358,13 @@ Remove ancestors that are descendants of other ancestors.
 """
         redundant_ancestors = set()
         for ancestor in portrait.ancestor_anchors:
-            for other in portrait.ancestor_anchors:
-                if ancestor == other:
-                    continue
-                if self.is_concept_descendant_of(
+            if any(
+                self.is_concept_descendant_of(
                     other, ancestor, self_is_parent=False
-                ):
-                    redundant_ancestors.add(ancestor)
-                break
+                )
+                for other in portrait.ancestor_anchors
+            ):
+                redundant_ancestors.add(ancestor)
         portrait.ancestor_anchors -= redundant_ancestors
 
     def get_concept_ppp(self, concept: SCTID) -> set[SCTID]:
