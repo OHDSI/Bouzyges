@@ -1,4 +1,5 @@
 import cProfile
+import datetime
 import dotenv
 import itertools
 import json
@@ -15,11 +16,7 @@ from typing import Iterable, Mapping
 
 
 # Parameters
-class ProfileMark(Exception):
-    """Interrupts flow of the program at arbitrary point for profiling"""
-
-
-PROFILING = True
+PROFILING = False
 
 
 # Boilerplate
@@ -353,6 +350,10 @@ Represents an interactively built semantic portrait of a source concept."""
 
 
 ## Exceptions
+class ProfileMark(Exception):
+    """Interrupts flow of the program at arbitrary point for profiling"""
+
+
 class SnowstormAPIError(Exception):
     """Raised when the Snowstorm API returns a bad response."""
 
@@ -815,8 +816,6 @@ Check if the answer contains a yes or no option.
                 "Could not find an unambiguous boolean answer in the response"
             )
 
-    # Following methods are abstract and represent common queries to the model
-    @abstractmethod
     def prompt_supertype(
         self,
         term: str,
@@ -828,75 +827,6 @@ Check if the answer contains a yes or no option.
         """\
 Prompt the model to choose the best matching proximal ancestor for a term.
 """
-
-    @abstractmethod
-    def prompt_attr_presence(
-        self,
-        term: str,
-        attribute: SCTDescription,
-        term_context: str | None = None,
-        attribute_context: str | None = None,
-    ) -> bool:
-        """\
-Prompt the model to decide if an attribute is present in a term.
-"""
-
-    @abstractmethod
-    def prompt_attr_value(
-        self,
-        term: str,
-        attribute: SCTDescription,
-        options: Iterable[SCTDescription],
-        term_context: str | None = None,
-        attribute_context: str | None = None,
-        options_context: dict[SCTDescription, str] | None = None,
-        allow_escape: bool = True,
-    ) -> SCTDescription | EscapeHatch:
-        """\
-Prompt the model to choose the value of an attribute in a term.
-"""
-
-    @abstractmethod
-    def prompt_subsumption(
-        self,
-        term: str,
-        prospective_supertype: SCTDescription,
-        term_context: str | None = None,
-        supertype_context: str | None = None,
-    ) -> bool:
-        """\
-Prompt the model to decide if a term is a subtype of a prospective supertype.
-
-Only meant to be used for Primitive concepts: use Bouzyges.check_subsumption for
-Fully Defined concepts.
-"""
-
-    @abstractmethod
-    def ping(self) -> bool:
-        """\
-Check if the API is available.
-"""
-
-    def cache_remember(self, prompt: Prompt, answer: str) -> None:
-        if self.cache:
-            self.cache.remember(self._model_id, prompt, answer)
-
-
-class HumanPrompter(Prompter):
-    """\
-A test prompter that interacts with a human to get answers.
-"""
-
-    _model_id = "human"
-
-    def prompt_supertype(
-        self,
-        term: str,
-        options: Iterable[SCTDescription],
-        allow_escape: bool = True,
-        term_context: str | None = None,
-        options_context: dict[SCTDescription, str] | None = None,
-    ) -> SCTDescription | EscapeHatch:
         # Construct the prompt
         prompt: Prompt = self.prompt_format.form_supertype(
             term, options, allow_escape, term_context, options_context
@@ -915,23 +845,6 @@ A test prompter that interacts with a human to get answers.
 
         # Get the answer
         return self._prompt_class_answer(allow_escape, options, prompt)
-
-    def _prompt_class_answer(self, allow_escape, options, prompt):
-        while True:
-            print(prompt.prompt_message)
-            brain_answer = input("Answer: ").strip()
-            try:
-                answer = self.unwrap_class_answer(
-                    brain_answer,
-                    options,
-                    EscapeHatch.WORD if allow_escape else None,
-                )
-                self.cache_remember(prompt, brain_answer)
-                return answer
-
-            except PrompterError as e:
-                print("Error:", e)
-                print("Please, provide an answer in the requested format.")
 
     def prompt_attr_presence(
         self,
@@ -955,18 +868,6 @@ A test prompter that interacts with a human to get answers.
 
         return self._prompt_bool_answer(prompt)
 
-    def _prompt_bool_answer(self, prompt):
-        while True:
-            print(prompt.prompt_message)
-            brain_answer = input("Answer: ").strip()
-            try:
-                answer = self.unwrap_bool_answer(brain_answer)
-                self.cache_remember(prompt, brain_answer)
-                return answer
-            except PrompterError as e:
-                print("Error:", e)
-                print("Please, provide an answer in the requested format.")
-
     def prompt_attr_value(
         self,
         term: str,
@@ -986,6 +887,9 @@ A test prompter that interacts with a human to get answers.
             options_context,
             allow_escape,
         )
+        """\
+Prompt the model to choose the value of an attribute in a term.
+"""
 
         if self.cache:
             if cached_answer := self.cache.get(self._model_id, prompt):
@@ -1009,6 +913,12 @@ A test prompter that interacts with a human to get answers.
         term_context: str | None = None,
         supertype_context: str | None = None,
     ) -> bool:
+        """\
+Prompt the model to decide if a term is a subtype of a prospective supertype.
+
+Only meant to be used for Primitive concepts: use Bouzyges.check_subsumption for
+Fully Defined concepts.
+"""
         prompt: Prompt = self.prompt_format.form_subsumption(
             term, prospective_supertype, term_context, supertype_context
         )
@@ -1024,6 +934,71 @@ A test prompter that interacts with a human to get answers.
                 return answer
 
         return self._prompt_bool_answer(prompt)
+
+    def cache_remember(self, prompt: Prompt, answer: str) -> None:
+        if self.cache:
+            self.cache.remember(self._model_id, prompt, answer)
+
+    # Following methods are abstract and represent common queries to the model
+    @abstractmethod
+    def _prompt_bool_answer(self, prompt: Prompt) -> bool:
+        """\
+Send a prompt to the counterpart agent to obtain the answer
+"""
+
+    @abstractmethod
+    def _prompt_class_answer(
+        self,
+        allow_escape: bool,
+        options: Iterable[SCTDescription],
+        prompt: Prompt,
+    ) -> SCTDescription | EscapeHatch:
+        """\
+Send a prompt to the counterpart agent to obtain a single choice answer.
+"""
+
+    @abstractmethod
+    def ping(self) -> bool:
+        """\
+Check if the API is available.
+"""
+
+
+class HumanPrompter(Prompter):
+    """\
+A test prompter that interacts with a human to get answers.
+"""
+
+    _model_id = "human"
+
+    def _prompt_class_answer(self, allow_escape, options, prompt):
+        while True:
+            print(prompt.prompt_message)
+            brain_answer = input("Answer: ").strip()
+            try:
+                answer = self.unwrap_class_answer(
+                    brain_answer,
+                    options,
+                    EscapeHatch.WORD if allow_escape else None,
+                )
+                self.cache_remember(prompt, brain_answer)
+                return answer
+
+            except PrompterError as e:
+                print("Error:", e)
+                print("Please, provide an answer in the requested format.")
+
+    def _prompt_bool_answer(self, prompt: Prompt) -> bool:
+        while True:
+            print(prompt.prompt_message)
+            brain_answer = input("Answer: ").strip()
+            try:
+                answer = self.unwrap_bool_answer(brain_answer)
+                self.cache_remember(prompt, brain_answer)
+                return answer
+            except PrompterError as e:
+                print("Error:", e)
+                print("Please, provide an answer in the requested format.")
 
     def ping(self) -> bool:
         input("Hey, are you here? (Press Enter) ")
@@ -1082,56 +1057,12 @@ A prompter that interfaces with the OpenAI API using Azure.
         print("API is not available")
         return False
 
-    def prompt_supertype(
-        self,
-        term: str,
-        options: Iterable[SCTDescription],
-        allow_escape: bool = True,
-        term_context: str | None = None,
-        options_context: dict[SCTDescription, str] | None = None,
-    ) -> SCTDescription | EscapeHatch:
-        _ = term, options, allow_escape, term_context, options_context
+    def _prompt_bool_answer(self, prompt: Prompt) -> bool:
+        _ = prompt
         raise NotImplementedError
 
-    def prompt_attr_presence(
-        self,
-        term: str,
-        attribute: SCTDescription,
-        term_context: str | None = None,
-        attribute_context: str | None = None,
-    ) -> bool:
-        _ = term, attribute, term_context, attribute_context
-        raise NotImplementedError
-
-    def prompt_attr_value(
-        self,
-        term: str,
-        attribute: SCTDescription,
-        options: Iterable[SCTDescription],
-        term_context: str | None = None,
-        attribute_context: str | None = None,
-        options_context: dict[SCTDescription, str] | None = None,
-        allow_escape: bool = True,
-    ) -> SCTDescription | EscapeHatch:
-        _ = (
-            term,
-            attribute,
-            options,
-            term_context,
-            attribute_context,
-            options_context,
-            allow_escape,
-        )
-        raise NotImplementedError
-
-    def prompt_subsumption(
-        self,
-        term: str,
-        prospective_supertype: SCTDescription,
-        term_context: str | None = None,
-        supertype_context: str | None = None,
-    ) -> bool:
-        _ = term, prospective_supertype, term_context, supertype_context
+    def _prompt_class_answer(self, allow_escape, options, prompt):
+        _ = allow_escape, options, prompt
         raise NotImplementedError
 
 
@@ -1142,11 +1073,6 @@ class SnowstormAPI:
     MAX_BAD_PARENT_QUERY = 32
 
     def __init__(self, url: URL):
-        # Debug
-        import datetime
-
-        self.__start_time = datetime.datetime.now()
-
         self.url: URL = url
         self.branch_path: BranchPath = self.get_main_branch_path()
 
@@ -1171,14 +1097,6 @@ raises an exception on non-200 responses.
         response = requests.get(*args, **kwargs)
         if not response.ok:
             raise SnowstormRequestError.from_response(response)
-
-        if PROFILING:
-            import datetime
-
-            time = datetime.datetime.now() - self.__start_time
-            if time.total_seconds() >= 10 * 60:
-                print("Profile this")
-                raise ProfileMark
 
         return response
 
@@ -1825,6 +1743,8 @@ otherwise.
         return True
 
     def run(self):
+        start_time = datetime.datetime.now()
+
         """Main routine"""
         self.populate_attribute_candidates()
         self.populate_unchecked_attributes()
@@ -1845,7 +1765,7 @@ otherwise.
                     cycles += updated
                 changes_made = bool(cycles)
 
-                self.snowstorm.remove_redundant_ancestors(portrait)
+            self.snowstorm.remove_redundant_ancestors(portrait)
 
         # Print resulting supertypes
         for term, portrait in self.portraits.items():
@@ -1853,6 +1773,9 @@ otherwise.
             for anchor in portrait.ancestor_anchors:
                 ancestor = self.snowstorm.get_concept(anchor)
                 print(" -", ancestor.sctid, ancestor.pt)
+
+        print("Started at:", start_time)
+        print("Time taken:", datetime.datetime.now() - start_time)
 
 
 if __name__ == "__main__":
