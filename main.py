@@ -13,7 +13,12 @@ from dataclasses import dataclass
 from frozendict import frozendict
 from typing import Iterable, Mapping
 
+
 # Parameters
+class ProfileMark(Exception):
+    """Interrupts flow of the program at arbitrary point for profiling"""
+
+
 PROFILING = True
 
 
@@ -1871,7 +1876,10 @@ if __name__ == "__main__":
 
     if PROFILING:
         with cProfile.Profile() as prof:
-            bouzyges.run()
+            try:
+                bouzyges.run()
+            except ProfileMark:
+                pass
         stats = pstats.Stats(prof)
         stats.sort_stats(pstats.SortKey.TIME)
         stats.dump_stats("stats.prof")
