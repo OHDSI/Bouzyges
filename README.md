@@ -31,12 +31,18 @@ Current implementation of Bouzyges relies on Snowstorm REST API to interface wit
 
 Snowstorm version 10 with SNOMED International (July 2024 release) was tested. We recommend using the Docker image provided by SNOMED International to run Snowstorm locally and loading the SNOMED RF2 release archive via Swagger UI.
 
+### External links:
+
+- [Snowstorm GitHub repository](https://github.com/IHTSDO/snowstorm)
+- [Using Snowstorm with Docker](https://github.com/IHTSDO/snowstorm/blob/master/docs/using-docker.md)
+- [SNOMED International release in RF2 format](https://www.nlm.nih.gov/healthit/snomedct/international.html) (hosted by NLM)
+
 ## LLM interface
 
 Bouzyges relies on outputting LLM prompts and parsing their input; currently, two options are supported:
 
 - Manual input: the user is prompted to input the desired LLM prompt and is expected to provide the input manually.
-- Automated input: currently, only Azure OpenAI API is supported. To use the API, you need to provide the endpoint and the API key either as environment variables or inside `.env` file in the root directory of the project. The file should contain definitions for the following environment variables:
+- Automated input: currently, only [Azure OpenAI](https://platform.openai.com/docs/libraries/azure-openai-libraries) API is supported. To use the API, you need to provide the endpoint and the API key either as an explicitly set environment variables or (preferred way) inside `.env` file in the root directory of the project. The file should contain definitions for the following environment variables:
 
 ```bash
 SNOWSTORM_ENDPOINT=
