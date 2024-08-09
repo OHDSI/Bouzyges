@@ -782,6 +782,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
     default_api_options = frozendict(
         # We want responses to use tokens we provide
         presence_penalty=-0.5,
+        max_tokens=1024,
     )
     _UnfinishedPrompt = list[dict[OpenAIPromptRole, str]]
 
@@ -896,6 +897,116 @@ Outputs prompts as JSONs and contains sensible API option defaults.
                 {
                     "user": (
                         "Attribute is defined as follows: " + attribute_context
+                    )
+                }
+            )
+
+        prompt.append(
+            {
+                "user": f"""Options are:
+ - {BooleanAnswer.YES}: The attribute is guaranteed present.
+ - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
+"""
+            }
+        )
+
+        return self.__finalise_prompt(
+            prompt,
+            frozenset((BooleanAnswer.YES, BooleanAnswer.NO)),
+        )
+
+    def form_attr_value(
+        self,
+        term: str,
+        attribute: SCTDescription,
+        options: Iterable[SCTDescription],
+        term_context: str | None = None,
+        attribute_context: str | None = None,
+        options_context: dict[SCTDescription, str] | None = None,
+        allow_escape: bool = True,
+    ) -> Prompt:
+        prompt = self._form_shared_history(allow_escape=allow_escape)
+
+        prompt.append(
+            {
+                "user": (
+                    f"Choose the value of the attribute '{attribute}' in the term "
+                    f"'{term}'."
+                )
+            }
+        )
+
+        if term_context:
+            prompt.append(
+                {
+                    "user": (
+                        " Following information is provided about the term: "
+                        + term_context
+                    )
+                }
+            )
+
+        if attribute_context:
+            prompt.append(
+                {
+                    "user": (
+                        " Attribute is defined as follows: " + attribute_context
+                    )
+                }
+            )
+
+        options_text = "Options, in no particular order:\n"
+        for option in sorted(options):  # Sort for cache consistency
+            options_text += f" - {self.wrap_term(option)}"
+            if options_context and option in options_context:
+                options_text += f": {options_context[option]}"
+            options_text += "\n"
+        # Remind of the escape hatch, just in case
+        if allow_escape:
+            options_text += f" - {EscapeHatch.WORD}: " "None of the above\n"
+
+        prompt.append({"user": options_text})
+
+        return self.__finalise_prompt(
+            prompt,
+            frozenset(options),
+            EscapeHatch.WORD if allow_escape else None,
+        )
+
+    def form_subsumption(
+        self,
+        term: str,
+        prospective_supertype: SCTDescription,
+        term_context: str | None = None,
+        supertype_context: str | None = None,
+    ) -> Prompt:
+        prompt = self._form_shared_history(allow_escape=False)
+
+        prompt.append(
+            {
+                "user": (
+                    f"Is the term '{term}' a subtype of the concept "
+                    f"'{prospective_supertype}'?"
+                )
+            }
+        )
+
+        if term_context:
+            prompt.append(
+                {
+                    "user": (
+                        " Following information is provided about the term: "
+                        + term_context
+                    )
+                }
+            )
+
+        if supertype_context:
+            prompt.append(
+                {
+                    "user": (
+                        " Following information is provided about the concept: "
+                        + supertype_context
                     )
                 }
             )
@@ -2049,7 +2160,7 @@ if __name__ == "__main__":
     api_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
     if api_key is not None and api_endpoint is not None:
         prompter = OpenAIAzurePrompter(
-            prompt_format=VerbosePromptFormat(),
+            prompt_format=OpenAIPromptFormat(),
             api_key=api_key,
             azure_endpoint=api_endpoint,
             api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
