@@ -25,6 +25,16 @@ except ImportError:
     )
     dotenv = None
 
+## tiktoken
+try:
+    import tiktoken
+except ImportError:
+    logging.warning(
+        "tiktoken package not installed. "
+        "Will not be able to use track token usage"
+    )
+    tiktoken = None
+
 
 # Parameters
 # TODO: use sys.argv for these
@@ -1291,6 +1301,14 @@ Send a prompt to the counterpart agent to obtain a single choice answer.
 Check if the API is available.
 """
 
+    @abstractmethod
+    def report_usage(self) -> None:
+        """\
+Report the usage of the API to the provider.
+
+Form is not specified, as it is provider-specific.
+"""
+
 
 class HumanPrompter(Prompter):
     """\
@@ -1333,6 +1351,12 @@ A test prompter that interacts with a human to get answers.
         print("Good human.")
         return True
 
+    def report_usage(self) -> None:
+        logging.info(
+            "No usage to report, as this is a human prompter. Stay "
+            "hydrated and have a good day!"
+        )
+
 
 class OpenAIAzurePrompter(Prompter):
     """\
@@ -1363,6 +1387,17 @@ A prompter that interfaces with the OpenAI API using Azure.
         )
         self._endpoint = azure_endpoint
         self._model_id = model or self.DEFAULT_MODEL
+
+        self._token_usage: dict[Prompt, int] = {}
+        if tiktoken is not None:
+            try:
+                self._encoding = tiktoken.encoding_for_model(self._model_id)
+            except KeyError:
+                logging.warning("Model not found in the token")
+                self._encoding = None
+        else:
+            logging.warning("Tiktoken not installed, can't track token usage")
+            self._encoding = None
 
     def ping(self) -> bool:
         logging.info("Pinging the Azure API...")
@@ -1399,7 +1434,16 @@ A prompter that interfaces with the OpenAI API using Azure.
         )
 
     def _prompt_answer(self, prompt: Prompt, parser: Callable[[str], T]) -> T:
-        logging.info("Prompting the Azure API for a boolean answer...")
+        logging.info("Prompting the Azure API for an answer...")
+
+        if self._encoding:
+            token_count = len(
+                self._encoding.encode(json.dumps(prompt.prompt_message))
+            )
+            self._token_usage[prompt] = token_count
+            logging.debug("Token usage:", token_count)
+        else:
+            logging.warning("Token usage will not be calculated: unknown model")
 
         for attempt in range(self.ATTEMPTS_BEFORE_FAIL + 1):
             logging.debug("Prompt message", prompt.prompt_message)
@@ -1431,6 +1475,18 @@ A prompter that interfaces with the OpenAI API using Azure.
 
         # Unreachable
         raise PrompterError("Unreachable code reached?!")
+
+    def report_usage(self) -> None:
+        logging.info("Reporting usage to the Azure API...")
+        if self._token_usage:
+            n_prompts = len(self._token_usage)
+            total_tokens = sum(self._token_usage.values())
+            logging.info(
+                f"Reporting {n_prompts} prompts with a total of "
+                f"{total_tokens} tokens"
+            )
+        else:
+            logging.warning("No token usage to report")
 
 
 class SnowstormAPI:
@@ -2141,6 +2197,7 @@ otherwise.
 
         logging.info("Started at:", start_time)
         logging.info("Time taken:", datetime.datetime.now() - start_time)
+        self.prompter.report_usage()
 
 
 if __name__ == "__main__":
