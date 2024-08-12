@@ -30,7 +30,7 @@ try:
     import tiktoken
 except ImportError:
     logging.warning(
-        "tiktoken package not installed. "
+        "tiktoken package is not installed. "
         "Will not be able to use track token usage"
     )
     tiktoken = None
@@ -40,6 +40,7 @@ except ImportError:
 # TODO: use sys.argv for these
 PROFILING = False
 logging.basicConfig(level=logging.DEBUG)
+STOP_AFTER_SECONDS: int | None = 600
 
 
 # Boilerplate
@@ -456,9 +457,9 @@ tokens.
         """\
 Get the answer from the cache for specified model.
 """
-        query = """
+        query = f"""
             SELECT response
-            FROM ?
+            FROM {self.table_name}
             WHERE
                 model = ? AND
                 prompt_text = ? AND
@@ -479,15 +480,13 @@ Get the answer from the cache for specified model.
             api_options = None
             query += " is ? ;"
 
-        if prompt_is_json := isinstance(prompt.prompt_message, list):
-            prompt_text = json.dumps(prompt.prompt_message)
-        else:
-            prompt_text = prompt.prompt_message
+        prompt_is_json = not isinstance(prompt.prompt_message, str)
+        prompt_text = json.dumps(prompt.prompt_message)
 
         cursor = self.connection.cursor()
         cursor.execute(
             query,
-            (self.table_name, model, prompt_text, prompt_is_json, api_options),
+            (model, prompt_text, prompt_is_json, api_options),
         )
         if answer := cursor.fetchone():
             return answer[0]
@@ -497,11 +496,11 @@ Get the answer from the cache for specified model.
         """\
 Remember the answer for the prompt for the specified model.
 """
-        query = """
-            INSERT INTO ? (
+        query = f"""
+            INSERT INTO {self.table_name} (
                 model, prompt_text, prompt_is_json, response, api_options
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?)
         """
         if prompt.api_options:
             api_options = json.dumps(
@@ -523,7 +522,6 @@ Remember the answer for the prompt for the specified model.
         cursor.execute(
             query,
             (
-                self.table_name,
                 model,
                 prompt_text,
                 prompt_is_json,
@@ -794,7 +792,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         presence_penalty=-0.5,
         max_tokens=1024,
     )
-    _UnfinishedPrompt = list[dict[OpenAIPromptRole, str]]
+    _UnfinishedPrompt = list[tuple[OpenAIPromptRole, str]]
 
     def __finalise_prompt(
         self,
@@ -802,13 +800,12 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         options: frozenset[SCTDescription] | None,
         escape_hatch: SCTDescription | None = None,
     ) -> Prompt:
-        history = []
-        for message in prompt:
-            for role, text in message.items():
-                history.append(frozendict({"role": role, "content": text}))
+        history = tuple(
+            frozendict({"role": r, "content": t}) for r, t in prompt
+        )
 
         return Prompt(
-            tuple(history),
+            history,  # type:ignore
             options,
             escape_hatch,
             self.default_api_options,
@@ -816,22 +813,26 @@ Outputs prompts as JSONs and contains sensible API option defaults.
 
     def _form_shared_history(self, allow_escape) -> _UnfinishedPrompt:
         prompt = [
-            {
-                "system": "You are " + self.ROLE + ".",
-            },
-            {
-                "system": "Your assignment is " + self.TASK + ".",
-            },
-            {
-                "system": "Please note that " + self.REQUIREMENTS + ".",
-            },
-            {
-                "system": "Your exact instructions are:",
-            },
-            {
-                "system": self.INSTRUCTIONS
-                + (allow_escape * self.ESCAPE_INSTRUCTIONS),
-            },
+            (
+                "system",
+                "You are " + self.ROLE + ".",
+            ),
+            (
+                "system",
+                "Your assignment is " + self.TASK + ".",
+            ),
+            (
+                "system",
+                "Please note that " + self.REQUIREMENTS + ".",
+            ),
+            (
+                "system",
+                "Your exact instructions are:",
+            ),
+            (
+                "system",
+                self.INSTRUCTIONS + (allow_escape * self.ESCAPE_INSTRUCTIONS),
+            ),
         ]
         return prompt
 
@@ -845,21 +846,23 @@ Outputs prompts as JSONs and contains sensible API option defaults.
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape)
         prompt.append(
-            {
-                "user": (
+            (
+                "user",
+                (
                     f"Given the term '{term}', what is the closest supertype or "
                     "exact equivalent of it's meaning from the following options?"
-                )
-            }
+                ),
+            )
         )
         if term_context:
             prompt.append(
-                {
-                    "user": (
+                (
+                    "user",
+                    (
                         "Following information is provided about the term: "
                         + term_context
-                    )
-                }
+                    ),
+                )
             )
 
         options_text = "Options, in no particular order:\n"
@@ -872,7 +875,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         if allow_escape:
             options_text += f" - {EscapeHatch.WORD}: " "None of the above\n"
 
-        prompt.append({"user": options_text})
+        prompt.append(("user", options_text))
 
         return self.__finalise_prompt(
             prompt,
@@ -889,35 +892,37 @@ Outputs prompts as JSONs and contains sensible API option defaults.
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape=False)
         prompt.append(
-            {
-                "user": f"Is the attribute '{attribute}' present in the term '{term}'?"
-            }
+            (
+                "user",
+                f"Is the attribute '{attribute}' present in the term '{term}'?",
+            )
         )
         if term_context:
             prompt.append(
-                {
-                    "user": (
+                (
+                    "user",
+                    (
                         "Following information is provided about the term: "
                         + term_context
-                    )
-                }
+                    ),
+                )
             )
         if attribute_context:
             prompt.append(
-                {
-                    "user": (
-                        "Attribute is defined as follows: " + attribute_context
-                    )
-                }
+                (
+                    "user",
+                    ("Attribute is defined as follows: " + attribute_context),
+                )
             )
 
         prompt.append(
-            {
-                "user": f"""Options are:
- - {BooleanAnswer.YES}: The attribute is guaranteed present.
- - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
-"""
-            }
+            (
+                "user",
+                f"""Options are:
+                    - {BooleanAnswer.YES}: The attribute is guaranteed present.
+                    - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
+                    """,
+            )
         )
 
         return self.__finalise_prompt(
@@ -938,31 +943,32 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         prompt = self._form_shared_history(allow_escape=allow_escape)
 
         prompt.append(
-            {
-                "user": (
+            (
+                "user",
+                (
                     f"Choose the value of the attribute '{attribute}' in the term "
                     f"'{term}'."
-                )
-            }
+                ),
+            )
         )
 
         if term_context:
             prompt.append(
-                {
-                    "user": (
+                (
+                    "user",
+                    (
                         " Following information is provided about the term: "
                         + term_context
-                    )
-                }
+                    ),
+                )
             )
 
         if attribute_context:
             prompt.append(
-                {
-                    "user": (
-                        " Attribute is defined as follows: " + attribute_context
-                    )
-                }
+                (
+                    "user",
+                    (" Attribute is defined as follows: " + attribute_context),
+                )
             )
 
         options_text = "Options, in no particular order:\n"
@@ -975,7 +981,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         if allow_escape:
             options_text += f" - {EscapeHatch.WORD}: " "None of the above\n"
 
-        prompt.append({"user": options_text})
+        prompt.append(("user", options_text))
 
         return self.__finalise_prompt(
             prompt,
@@ -993,41 +999,45 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         prompt = self._form_shared_history(allow_escape=False)
 
         prompt.append(
-            {
-                "user": (
+            (
+                "user",
+                (
                     f"Is the term '{term}' a subtype of the concept "
                     f"'{prospective_supertype}'?"
-                )
-            }
+                ),
+            )
         )
 
         if term_context:
             prompt.append(
-                {
-                    "user": (
+                (
+                    "user",
+                    (
                         " Following information is provided about the term: "
                         + term_context
-                    )
-                }
+                    ),
+                )
             )
 
         if supertype_context:
             prompt.append(
-                {
-                    "user": (
+                (
+                    "user",
+                    (
                         " Following information is provided about the concept: "
                         + supertype_context
-                    )
-                }
+                    ),
+                )
             )
 
         prompt.append(
-            {
-                "user": f"""Options are:
- - {BooleanAnswer.YES}: The attribute is guaranteed present.
- - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
-"""
-            }
+            (
+                "user",
+                f"""Options are:
+                    - {BooleanAnswer.YES}: The attribute is guaranteed present.
+                    - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
+                    """,
+            )
         )
 
         return self.__finalise_prompt(
@@ -1151,6 +1161,7 @@ Prompt the model to choose the best matching proximal ancestor for a term.
         prompt: Prompt = self.prompt_format.form_supertype(
             term, options, allow_escape, term_context, options_context
         )
+        logging.debug("Constructed prompt: %s", prompt.prompt_message)
 
         # Try the cache
         if self.cache:
@@ -1364,7 +1375,7 @@ A prompter that interfaces with the OpenAI API using Azure.
 """
 
     DEFAULT_MODEL = "gpt-35-turbo"
-    DEFAULT_VERSION = "2023-07-01-preview"
+    DEFAULT_VERSION = "2024-06-01"
 
     ATTEMPTS_BEFORE_FAIL = 3
 
@@ -1380,13 +1391,13 @@ A prompter that interfaces with the OpenAI API using Azure.
         super().__init__(*args, **kwargs)
 
         logging.info("Initializing the Azure API client...")
+        self._model_id = model or self.DEFAULT_MODEL
         self._client = openai.AzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
+            azure_deployment=self._model_id,
             api_version=api_version or self.DEFAULT_VERSION,
         )
-        self._endpoint = azure_endpoint
-        self._model_id = model or self.DEFAULT_MODEL
 
         self._token_usage: dict[Prompt, int] = {}
         if tiktoken is not None:
@@ -1450,10 +1461,16 @@ A prompter that interfaces with the OpenAI API using Azure.
             if attempt > 0:
                 logging.warning("Retrying...")
 
+            if not isinstance(prompt.prompt_message, str):
+                # Clean-up types for plain JSON
+                prompt_text = json.loads(json.dumps(prompt.prompt_message))
+            else:
+                prompt_text = prompt.prompt_message
+
             try:
                 brain_answer = self._client.completions.create(
                     model=self._model_id,
-                    prompt=prompt.prompt_message,  # type: ignore
+                    prompt=prompt_text,
                     # Prefer answers with same tokens
                     **(prompt.api_options or {}),
                 )
@@ -1496,6 +1513,9 @@ class SnowstormAPI:
     MAX_BAD_PARENT_QUERY = 32
 
     def __init__(self, url: URL):
+        # Debug
+        self.__start_time = datetime.datetime.now()
+
         self.url: URL = url
         self.branch_path: BranchPath = self.get_main_branch_path()
 
@@ -1508,6 +1528,12 @@ class SnowstormAPI:
 Wrapper for requests.get that prepends known url and
 raises an exception on non-200 responses.
 """
+        # Check for the timeout
+        if PROFILING and STOP_AFTER_SECONDS is not None:
+            elapsed = datetime.datetime.now() - self.__start_time
+            if elapsed.total_seconds() > STOP_AFTER_SECONDS:
+                raise ProfileMark("Time limit exceeded")
+
         # Include the known url
         if "url" not in kwargs:
             args = (self.url + args[0], *args[1:])
@@ -2196,7 +2222,10 @@ otherwise.
                 print(" -", ancestor.sctid, ancestor.pt)
 
         logging.info("Started at:", start_time)
-        logging.info("Time taken:", datetime.datetime.now() - start_time)
+        logging.info(
+            "Time taken (s):",
+            (datetime.datetime.now() - start_time).total_seconds(),
+        )
         self.prompter.report_usage()
 
 
