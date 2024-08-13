@@ -500,7 +500,7 @@ Remember the answer for the prompt for the specified model.
             INSERT INTO {self.table_name} (
                 model, prompt_text, prompt_is_json, response, api_options
             )
-            VALUES (?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?)
         """
         if prompt.api_options:
             api_options = json.dumps(
@@ -514,7 +514,7 @@ Remember the answer for the prompt for the specified model.
         cursor = self.connection.cursor()
 
         # Shape the prompt text
-        if prompt_is_json := isinstance(prompt.prompt_message, list):
+        if prompt_is_json := isinstance(prompt.prompt_message, tuple):
             prompt_text = json.dumps(prompt.prompt_message)
         else:
             prompt_text = prompt.prompt_message
@@ -1137,10 +1137,10 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
         """\
 Check if the answer contains a yes or no option.
 """
-        words = answer.strip().splitlines()[-1].split()
-        if yes in words and no not in words:
+        last_line = answer.strip().splitlines()[-1]
+        if yes in last_line and no not in last_line:
             return True
-        elif no in words and yes not in words:
+        elif no in last_line and yes not in last_line:
             return False
         else:
             raise PrompterError(
@@ -1165,15 +1165,14 @@ Prompt the model to choose the best matching proximal ancestor for a term.
         logging.debug("Constructed prompt: %s", prompt.prompt_message)
 
         # Try the cache
-        if self.cache:
-            if cached_answer := self.cache.get(self._model_id, prompt):
-                answer = self.unwrap_class_answer(
-                    cached_answer,
-                    options,
-                    EscapeHatch.WORD if allow_escape else None,
-                )
-                logging.info(f"From cache: {answer} is a supertype of {term}")
-                return answer
+        if cached_answer := self.cache_get(prompt):
+            answer = self.unwrap_class_answer(
+                cached_answer,
+                options,
+                EscapeHatch.WORD if allow_escape else None,
+            )
+            logging.info(f"From cache: {answer} is a supertype of {term}")
+            return answer
 
         # Get the answer
         answer = self._prompt_class_answer(allow_escape, options, prompt)
@@ -1191,14 +1190,13 @@ Prompt the model to choose the best matching proximal ancestor for a term.
             term, attribute, term_context, attribute_context
         )
 
-        if self.cache:
-            if cached_answer := self.cache.get(self._model_id, prompt):
-                answer = self.unwrap_bool_answer(cached_answer)
-                logging.info(
-                    f"From cache: The attribute '{attribute}' is "
-                    f"{'present' if answer else 'absent'} in '{term}'"
-                )
-                return answer
+        if cached_answer := self.cache_get(prompt):
+            answer = self.unwrap_bool_answer(cached_answer)
+            logging.info(
+                f"From cache: The attribute '{attribute}' is "
+                f"{'present' if answer else 'absent'} in '{term}'"
+            )
+            return answer
 
         answer = self._prompt_bool_answer(prompt)
         logging.info(
@@ -1230,18 +1228,17 @@ Prompt the model to choose the best matching proximal ancestor for a term.
 Prompt the model to choose the value of an attribute in a term.
 """
 
-        if self.cache:
-            if cached_answer := self.cache.get(self._model_id, prompt):
-                answer = self.unwrap_class_answer(
-                    cached_answer,
-                    options,
-                    EscapeHatch.WORD if allow_escape else None,
-                )
-                logging.info(
-                    f"From cache: The value of the attribute '{attribute}' in "
-                    f"'{term}' is '{answer}'"
-                )
-                return answer
+        if cached_answer := self.cache_get(prompt):
+            answer = self.unwrap_class_answer(
+                cached_answer,
+                options,
+                EscapeHatch.WORD if allow_escape else None,
+            )
+            logging.info(
+                f"From cache: The value of the attribute '{attribute}' in "
+                f"'{term}' is '{answer}'"
+            )
+            return answer
 
         answer = self._prompt_class_answer(allow_escape, options, prompt)
         logging.info(
@@ -1267,15 +1264,14 @@ Fully Defined concepts.
             term, prospective_supertype, term_context, supertype_context
         )
 
-        if self.cache:
-            if cached_answer := self.cache.get(self._model_id, prompt):
-                answer = self.unwrap_bool_answer(cached_answer)
-                logging.info(
-                    f"From cache: The term '{term}' is",
-                    "a subtype" if answer else "not a subtype",
-                    f"of '{prospective_supertype}'",
-                )
-                return answer
+        if cached_answer := self.cache_get(prompt):
+            answer = self.unwrap_bool_answer(cached_answer)
+            logging.info(
+                f"From cache: The term '{term}' is",
+                "a subtype" if answer else "not a subtype",
+                f"of '{prospective_supertype}'",
+            )
+            return answer
 
         answer = self._prompt_bool_answer(prompt)
         logging.info(
@@ -1288,6 +1284,11 @@ Fully Defined concepts.
     def cache_remember(self, prompt: Prompt, answer: str) -> None:
         if self.cache:
             self.cache.remember(self._model_id, prompt, answer)
+
+    def cache_get(self, prompt: Prompt) -> str | None:
+        if self.cache:
+            return self.cache.get(self._model_id, prompt)
+        return None
 
     # Following methods are abstract and represent common queries to the model
     @abstractmethod
@@ -1446,6 +1447,14 @@ A prompter that interfaces with the OpenAI API using Azure.
         )
 
     def _prompt_answer(self, prompt: Prompt, parser: Callable[[str], T]) -> T:
+        logging.info("Trying cache for answer...")
+        if cached_answer := self.cache_get(prompt):
+            answer = parser(cached_answer)
+            logging.info("Cache hit!")
+            return answer
+        else:
+            logging.info("Cache miss")
+
         logging.info("Prompting the Azure API for an answer...")
 
         if self._estimation_encoding:
@@ -1461,20 +1470,19 @@ A prompter that interfaces with the OpenAI API using Azure.
 
         logging.debug("Prompt message", prompt.prompt_message)
 
-        if not isinstance(prompt.prompt_message, str):
-            # Clean-up types for plain JSON
-            prompt_text = json.loads(json.dumps(prompt.prompt_message))
-        else:
-            prompt_text = [
+        if isinstance(prompt.prompt_message, str):
+            messages = [
                 {
                     "role": "system",
                     "message": prompt.prompt_message,
                 },
             ]
+        else:
+            messages = prompt.prompt_message
 
         try:
             brain_answer = self._client.chat.completions.create(
-                messages=prompt_text,  # type:ignore
+                messages=messages,  # type: ignore
                 model=self._model_id,
                 **(prompt.api_options or {}),
             )
@@ -1482,11 +1490,19 @@ A prompter that interfaces with the OpenAI API using Azure.
             logging.error("API error:", e)
             raise PrompterError("Failed to get a response from the API")
 
+        self._actual_token_usage[prompt] = brain_answer.usage.total_tokens
+        response_message = brain_answer.choices[0].message.content
+
+        # Why is this happening?
+        if isinstance(response_message, tuple) and len(response_message) == 1:
+            response_message: str = "".join(response_message)
+        else:
+            response_message = str(response_message)
+
+        logging.debug("Literal response:", response_message)
         try:
-            response_message = brain_answer.choices[0].message.content
             answer = parser(response_message)
             self.cache_remember(prompt, response_message)
-            self._actual_token_usage[prompt] = brain_answer.usage.total_tokens
             return answer
         except PrompterError as e:
             logging.error("Error:", e)
