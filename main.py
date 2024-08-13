@@ -555,9 +555,9 @@ Abstract class for formatting prompts for the LLM agent.
         "that says 'The answer is ' and the chosen option"
     )
     INSTRUCTIONS = (
-        "Options that speculate about details not explicitly included in the"
+        "Options that speculate about details NOT EXPLICITLY INCLUDED in the"
         "term meaning are to be avoided, e.g. term 'operation on abdominal "
-        "region' should not be assumed to be a laparoscopic operation, as "
+        "region' should NOT be assumed to be a laparoscopic operation, as "
         "access method is not specified in the term. It is encouraged to "
         "explain your reasoning when providing answers. The automated system "
         "will look for the last answer surrounded by square brackets, e.g. "
@@ -572,8 +572,8 @@ Abstract class for formatting prompts for the LLM agent.
 
     ESCAPE_INSTRUCTIONS = (
         " If all provided options are incorrect, or imply extra information "
-        "not present in the term, you must explain why each option is "
-        "incorrect, and finalize the answer with the word "
+        "not present EXPLICITLY AND UNAMBIGUOUSLY in the term, you must explain "
+        "why each option is incorrect, and finalize the answer with the word "
         f"{EscapeHatch.WORD}."
     )
 
@@ -732,7 +732,8 @@ Contains no API options and only string prompts, intended for human prompters.
         prompt = self._form_shared_header(allow_escape=allow_escape)
         prompt += (
             f"Choose the value of the attribute '{attribute}' in the term "
-            f"'{term}'."
+            f"'{term}'. The answer should be the best matching option, either "
+            f"exact, or a likely supertype of an actual value."
         )
         if term_context:
             prompt += " Following information is provided about the term: "
@@ -791,7 +792,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         # We want responses to use tokens we provide
         presence_penalty=-0.5,
         # max_tokens=1024,
-        timeout=5,
+        timeout=15,
     )
     _UnfinishedPrompt = list[tuple[OpenAIPromptRole, str]]
 
@@ -920,9 +921,8 @@ Outputs prompts as JSONs and contains sensible API option defaults.
             (
                 "user",
                 f"""Options are:
-                    - {BooleanAnswer.YES}: The attribute is guaranteed present.
-                    - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
-                    """,
+- {BooleanAnswer.YES}: The attribute is guaranteed present.
+- {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.""",
             )
         )
 
@@ -947,8 +947,8 @@ Outputs prompts as JSONs and contains sensible API option defaults.
             (
                 "user",
                 (
-                    f"Choose the value of the attribute '{attribute}' in the term "
-                    f"'{term}'."
+                    f"Choose the value of the attribute '{attribute}' "
+                    f"in the term '{term}'."
                 ),
             )
         )
@@ -1035,9 +1035,8 @@ Outputs prompts as JSONs and contains sensible API option defaults.
             (
                 "user",
                 f"""Options are:
-                    - {BooleanAnswer.YES}: The attribute is guaranteed present.
-                    - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.
-                    """,
+ - {BooleanAnswer.YES}: The attribute is guaranteed present.
+ - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.""",
             )
         )
 
@@ -1080,17 +1079,20 @@ Check if answer has exactly one valid option.
 Assumes that the answer is a valid option if it is wrapped in brackets.
 """
         last_line = answer.strip().splitlines()[-1]
+        # Try to parse the last line, then the answer as a whole
+        look_at = [last_line, answer]
 
         if not options:
-            # Return the answer in brackets, if there is one
-            if last_line.count("[") == last_line.count("]") == 1:
-                start = last_line.index("[") + 1
-                end = last_line.index("]")
-                return SCTDescription(last_line[start:end])
-            else:
-                raise PrompterError(
-                    "Could not find a unique option in the answer:", last_line
-                )
+            for text in look_at:
+                # Return the answer in brackets, if there is one
+                if text.count("[") == text.count("]") == 1:
+                    start = text.index("[") + 1
+                    end = text.index("]")
+                    return SCTDescription(text[start:end])
+
+            raise PrompterError(
+                "Could not find a unique option in the answer:", last_line
+            )
 
         wrapped_options = {
             PromptFormat.wrap_term(option): option for option in options
@@ -1102,31 +1104,32 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
                 EscapeHatch.WORD: escape_hatch,
             }
 
-        counts = {}
-        for option in wrapped_options:
-            counts[option] = last_line.count(option)
+        for text in look_at:
+            counts = {}
+            for option in wrapped_options:
+                counts[option] = text.count(option)
 
-        # Check if there is exactly one option present
-        if sum(map(bool, counts.values())) == 1:
-            for option, count in counts.items():
-                if count:
-                    return (
-                        SCTDescription(option[1:-1])
-                        if option != escape_hatch
-                        else NULL_ANSWER
-                    )
+            # Check if there is exactly one option present
+            if sum(map(bool, counts.values())) == 1:
+                for option, count in counts.items():
+                    if count:
+                        return (
+                            SCTDescription(option[1:-1])
+                            if option != escape_hatch
+                            else NULL_ANSWER
+                        )
 
-        # Return the last encountered option in brackets
-        indices: dict[SCTDescription | EscapeHatch, int] = {
-            option: last_line.rfind(wrapped)
-            for wrapped, option in wrapped_options.items()
-        }
-        if all(index == -1 for index in indices.values()):
-            raise PrompterError(
-                "Could not find a unique option in the answer:", last_line
-            )
+            # Return the last encountered option in brackets
+            indices: dict[SCTDescription | EscapeHatch, int] = {
+                option: text.rfind(wrapped)
+                for wrapped, option in wrapped_options.items()
+            }
+            if any(index != -1 for index in indices.values()):
+                return max(indices, key=lambda k: indices.get(k, -1))
 
-        return max(indices, key=lambda k: indices.get(k, -1))
+        raise PrompterError(
+            "Could not find a unique option in the answer:", last_line
+        )
 
     @staticmethod
     def unwrap_bool_answer(
@@ -1446,7 +1449,9 @@ A prompter that interfaces with the OpenAI API using Azure.
             ),
         )
 
-    def _prompt_answer(self, prompt: Prompt, parser: Callable[[str], T]) -> T:
+    def _prompt_answer(
+        self, prompt: Prompt, parser: Callable[[str], T], parse_retries_left=3
+    ) -> T:
         logging.info("Trying cache for answer...")
         if cached_answer := self.cache_get(prompt):
             answer = parser(cached_answer)
@@ -1468,7 +1473,9 @@ A prompter that interfaces with the OpenAI API using Azure.
         else:
             logging.warning("Token usage will not be estimated: unknown model")
 
-        logging.debug("Prompt message", prompt.prompt_message)
+        logging.debug(
+            "Prompt message", json.dumps(prompt.prompt_message, indent=2)
+        )
 
         if isinstance(prompt.prompt_message, str):
             messages = [
@@ -1490,22 +1497,27 @@ A prompter that interfaces with the OpenAI API using Azure.
             logging.error("API error:", e)
             raise PrompterError("Failed to get a response from the API")
 
-        self._actual_token_usage[prompt] = brain_answer.usage.total_tokens
+        self._actual_token_usage[prompt] = (
+            self._actual_token_usage.get(prompt, 0)
+            + brain_answer.usage.total_tokens
+        )
         response_message = brain_answer.choices[0].message.content
 
-        # Why is this happening?
-        if isinstance(response_message, tuple) and len(response_message) == 1:
-            response_message: str = "".join(response_message)
-        else:
-            response_message = str(response_message)
-
-        logging.debug("Literal response:", response_message)
+        logging.debug(f"Literal response: {response_message}")
         try:
             answer = parser(response_message)
             self.cache_remember(prompt, response_message)
             return answer
         except PrompterError as e:
-            logging.error("Error:", e)
+            logging.error("Error parsing response:", e)
+            if parse_retries_left > 0:
+                logging.warning(
+                    "Retrying parsing the answer, attempts left:",
+                    parse_retries_left,
+                )
+                return self._prompt_answer(
+                    prompt, parser, parse_retries_left - 1
+                )
             raise PrompterError("Failed to parse the answer")
 
     def report_usage(self) -> None:
