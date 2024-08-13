@@ -790,7 +790,8 @@ Outputs prompts as JSONs and contains sensible API option defaults.
     default_api_options = frozendict(
         # We want responses to use tokens we provide
         presence_penalty=-0.5,
-        max_tokens=1024,
+        # max_tokens=1024,
+        timeout=5,
     )
     _UnfinishedPrompt = list[tuple[OpenAIPromptRole, str]]
 
@@ -911,7 +912,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
             prompt.append(
                 (
                     "user",
-                    ("Attribute is defined as follows: " + attribute_context),
+                    "Attribute is defined as follows: " + attribute_context,
                 )
             )
 
@@ -1377,8 +1378,6 @@ A prompter that interfaces with the OpenAI API using Azure.
     DEFAULT_MODEL = "gpt-35-turbo"
     DEFAULT_VERSION = "2024-06-01"
 
-    ATTEMPTS_BEFORE_FAIL = 3
-
     def __init__(
         self,
         *args,
@@ -1395,20 +1394,22 @@ A prompter that interfaces with the OpenAI API using Azure.
         self._client = openai.AzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
-            azure_deployment=self._model_id,
             api_version=api_version or self.DEFAULT_VERSION,
         )
 
-        self._token_usage: dict[Prompt, int] = {}
+        self._estimated_token_usage: dict[Prompt, int] = {}
+        self._actual_token_usage: dict[Prompt, int] = {}
         if tiktoken is not None:
             try:
-                self._encoding = tiktoken.encoding_for_model(self._model_id)
+                self._estimation_encoding = tiktoken.encoding_for_model(
+                    self._model_id
+                )
             except KeyError:
                 logging.warning("Model not found in the token")
-                self._encoding = None
+                self._estimation_encoding = None
         else:
             logging.warning("Tiktoken not installed, can't track token usage")
-            self._encoding = None
+            self._estimation_encoding = None
 
     def ping(self) -> bool:
         logging.info("Pinging the Azure API...")
@@ -1423,7 +1424,7 @@ A prompter that interfaces with the OpenAI API using Azure.
         success = response.get("data", []) != []
         if success:
             logging.info("API is available")
-            if self._model_id not in [obj["id"] for obj in response["data"]]:
+            if not any(self._model_id == obj["id"] for obj in response["data"]):
                 logging.warning(
                     f"But '{self._model_id}' is not present in the API response!"
                 )
@@ -1447,63 +1448,68 @@ A prompter that interfaces with the OpenAI API using Azure.
     def _prompt_answer(self, prompt: Prompt, parser: Callable[[str], T]) -> T:
         logging.info("Prompting the Azure API for an answer...")
 
-        if self._encoding:
+        if self._estimation_encoding:
             token_count = len(
-                self._encoding.encode(json.dumps(prompt.prompt_message))
+                self._estimation_encoding.encode(
+                    json.dumps(prompt.prompt_message)
+                )
             )
-            self._token_usage[prompt] = token_count
+            self._estimated_token_usage[prompt] = token_count
             logging.debug("Token usage:", token_count)
         else:
-            logging.warning("Token usage will not be calculated: unknown model")
+            logging.warning("Token usage will not be estimated: unknown model")
 
-        for attempt in range(self.ATTEMPTS_BEFORE_FAIL + 1):
-            logging.debug("Prompt message", prompt.prompt_message)
-            if attempt > 0:
-                logging.warning("Retrying...")
+        logging.debug("Prompt message", prompt.prompt_message)
 
-            if not isinstance(prompt.prompt_message, str):
-                # Clean-up types for plain JSON
-                prompt_text = json.loads(json.dumps(prompt.prompt_message))
-            else:
-                prompt_text = prompt.prompt_message
+        if not isinstance(prompt.prompt_message, str):
+            # Clean-up types for plain JSON
+            prompt_text = json.loads(json.dumps(prompt.prompt_message))
+        else:
+            prompt_text = [
+                {
+                    "role": "system",
+                    "message": prompt.prompt_message,
+                },
+            ]
 
-            try:
-                brain_answer = self._client.completions.create(
-                    model=self._model_id,
-                    prompt=prompt_text,
-                    # Prefer answers with same tokens
-                    **(prompt.api_options or {}),
-                )
-            except openai.APIError as e:
-                logging.error("API error:", e)
-                if attempt == self.ATTEMPTS_BEFORE_FAIL:
-                    raise PrompterError("Failed to get a response from the API")
-                continue
+        try:
+            brain_answer = self._client.chat.completions.create(
+                messages=prompt_text,  # type:ignore
+                model=self._model_id,
+                **(prompt.api_options or {}),
+            )
+        except openai.APIError as e:
+            logging.error("API error:", e)
+            raise PrompterError("Failed to get a response from the API")
 
-            try:
-                answer = parser(brain_answer.choices[0].text)
-                self.cache_remember(prompt, brain_answer.choices[0].text)
-                return answer
-            except PrompterError as e:
-                logging.error("Error:", e)
-                if attempt == self.ATTEMPTS_BEFORE_FAIL:
-                    raise PrompterError("Failed to parse the answer")
-                continue
-
-        # Unreachable
-        raise PrompterError("Unreachable code reached?!")
+        try:
+            response_message = brain_answer.choices[0].message.content
+            answer = parser(response_message)
+            self.cache_remember(prompt, response_message)
+            self._actual_token_usage[prompt] = brain_answer.usage.total_tokens
+            return answer
+        except PrompterError as e:
+            logging.error("Error:", e)
+            raise PrompterError("Failed to parse the answer")
 
     def report_usage(self) -> None:
         logging.info("Reporting usage to the Azure API...")
-        if self._token_usage:
-            n_prompts = len(self._token_usage)
-            total_tokens = sum(self._token_usage.values())
+        if self._estimated_token_usage:
+            n_prompts = len(self._estimated_token_usage)
+            total_tokens = sum(self._estimated_token_usage.values())
             logging.info(
-                f"Reporting {n_prompts} prompts with a total of "
+                f"Estimation: reporting {n_prompts} prompts with a total of "
                 f"{total_tokens} tokens"
             )
         else:
-            logging.warning("No token usage to report")
+            logging.warning("No estimation of token usage to report")
+
+        n_prompts = len(self._actual_token_usage)
+        total_tokens = sum(self._actual_token_usage.values())
+        logging.info(
+            f"Actual: reporting {n_prompts} prompts with a total of "
+            f"{total_tokens} tokens"
+        )
 
 
 class SnowstormAPI:
@@ -1543,7 +1549,13 @@ raises an exception on non-200 responses.
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Accept"] = "application/json"
 
-        response = requests.get(*args, **kwargs)
+        try:
+            response = requests.get(*args, **kwargs)
+        except requests.exceptions.RequestException as e:
+            raise SnowstormRequestError(
+                "Could not connect to Snowstorm API:", e
+            )
+
         if not response.ok:
             raise SnowstormRequestError.from_response(response)
 
@@ -2226,7 +2238,6 @@ otherwise.
             "Time taken (s):",
             (datetime.datetime.now() - start_time).total_seconds(),
         )
-        self.prompter.report_usage()
 
 
 if __name__ == "__main__":
@@ -2277,3 +2288,4 @@ if __name__ == "__main__":
         stats.dump_stats("stats.prof")
     else:
         bouzyges.run()
+    bouzyges.prompter.report_usage()
