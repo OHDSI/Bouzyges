@@ -95,7 +95,7 @@ T = TypeVar("T")
 # TODO: use sys.argv for these
 PROFILING = True
 logging.basicConfig(level=logging.DEBUG)
-STOP_PROFILING_AFTER_SECONDS: int | None = 600
+STOP_PROFILING_AFTER_SECONDS: int | None = None
 PROMPTER_OPTION: PrompterOption = "openai"
 
 
@@ -554,6 +554,7 @@ Abstract class for formatting prompts for the LLM agent.
         "attributes, attribute values, and other relevant information as "
         "requested"
     )
+
     REQUIREMENTS = (
         "in addition to providing accurate factually correct information, "
         "it is critically important that you provide answer in a "
@@ -768,8 +769,10 @@ Contains no API options and only string prompts, intended for human prompters.
     ) -> Prompt:
         prompt = self._form_shared_header(allow_escape=False)
         prompt += (
-            f"Is the term '{term}' a subtype of the concept "
-            f"'{prospective_supertype}'?"
+            f"Is the term '{term}' a STRICT SUBTYPE or EXACT MATCH of the "
+            f"concept '{prospective_supertype}'? If the term has any "
+            f"additional meaning not present in the concept, it can not be "
+            f"considered a subtype."
         )
 
         if term_context:
@@ -1386,7 +1389,7 @@ class OpenAIPrompter(Prompter):
 A prompter that interfaces with the OpenAI API using.
 """
 
-    DEFAULT_MODEL = "gpt-3.5-turbo"
+    DEFAULT_MODEL = "gpt-4o-mini"
 
     def __init__(
         self,
@@ -1483,7 +1486,7 @@ A prompter that interfaces with the OpenAI API using.
                 )
             )
             self._estimated_token_usage[prompt] = token_count
-            logging.debug(f"Token usage: {token_count}")
+            logging.debug(f"Estimated token usage for prompt: {token_count}")
         else:
             logging.warning("Token usage will not be estimated: unknown model")
 
@@ -1511,11 +1514,20 @@ A prompter that interfaces with the OpenAI API using.
             logging.error(f"API error: {e}")
             raise PrompterError("Failed to get a response from the API")
 
+        response_message = brain_answer.choices[0].message.content
+        if self._estimation_encoding:
+            token_count = len(
+                self._estimation_encoding.encode(response_message)
+            )
+            self._estimated_token_usage[prompt] = (
+                self._estimated_token_usage.get(prompt, 0) + token_count
+            )
+            logging.debug(f"Estimated token usage for answer: {token_count}")
+
         self._actual_token_usage[prompt] = (
             self._actual_token_usage.get(prompt, 0)
             + brain_answer.usage.total_tokens
         )
-        response_message = brain_answer.choices[0].message.content
 
         logging.debug(f"Literal response: {response_message}")
         try:
@@ -1535,7 +1547,7 @@ A prompter that interfaces with the OpenAI API using.
             raise PrompterError("Failed to parse the answer")
 
     def report_usage(self) -> None:
-        logging.info("Reporting usage to the Azure API...")
+        logging.info("Reporting usage to the OpenAI API...")
         if self._estimated_token_usage:
             n_prompts = len(self._estimated_token_usage)
             total_tokens = sum(self._estimated_token_usage.values())
