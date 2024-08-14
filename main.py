@@ -629,6 +629,7 @@ term.
         term: str,
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
+        old_value: SCTDescription | None = None,
         term_context: str | None = None,
         attribute_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
@@ -732,6 +733,7 @@ Contains no API options and only string prompts, intended for human prompters.
         term: str,
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
+        old_value: SCTDescription | None = None,
         term_context: str | None = None,
         attribute_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
@@ -743,6 +745,12 @@ Contains no API options and only string prompts, intended for human prompters.
             f"'{term}'. The answer should be the best matching option, either "
             f"exact, or a likely supertype of an actual value."
         )
+        if old_value:
+            prompt += f" The previous value was '{old_value}'. IF, AND ONLY "
+            prompt += "IF you think he previous value is close enough, "
+            prompt += "while all of the options provide context not present "
+            prompt += f"in the term, respond {EscapeHatch.WORD} to keep the "
+            prompt += "old value."
         if term_context:
             prompt += " Following information is provided about the term: "
             prompt += term_context
@@ -946,6 +954,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         term: str,
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
+        old_value: SCTDescription | None = None,
         term_context: str | None = None,
         attribute_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
@@ -964,6 +973,19 @@ Outputs prompts as JSONs and contains sensible API option defaults.
                 ),
             )
         )
+        if old_value:
+            prompt.append(
+                (
+                    "user",
+                    (
+                        f" The previous value was '{old_value}'. IF, AND ONLY "
+                        f"IF you think he previous value is close enough, "
+                        f"while all of the options provide context not present "
+                        f"in the term, respond {EscapeHatch.WORD} to keep the "
+                        f"old value."
+                    ),
+                )
+            )
 
         if term_context:
             prompt.append(
@@ -1225,6 +1247,7 @@ Prompt the model to choose the best matching proximal ancestor for a term.
         term: str,
         attribute: SCTDescription,
         options: Iterable[SCTDescription],
+        old_value: SCTDescription | None = None,
         term_context: str | None = None,
         attribute_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
@@ -1234,6 +1257,7 @@ Prompt the model to choose the best matching proximal ancestor for a term.
             term,
             attribute,
             options,
+            old_value,
             term_context,
             attribute_context,
             options_context,
@@ -2134,6 +2158,7 @@ Initialize supertypes for all terms to start building portraits.
                     term=portrait.source_term,
                     attribute=portrait.relevant_constraints[attribute].pt,
                     options=values_options.values(),
+                    old_value=None,
                     term_context="; ".join(portrait.context)
                     if portrait.context
                     else None,
@@ -2165,6 +2190,7 @@ Update existing attribute values with the most precise descendant for all terms.
             new_attributes = {}
             for attribute, value in portrait.attributes.items():
                 new_attributes[attribute] = value
+                new_attribute_pt = self.snowstorm.get_concept(attribute).pt
                 while True:
                     # Get children of the current value
                     children = self.snowstorm.get_concept_children(
@@ -2181,6 +2207,7 @@ Update existing attribute values with the most precise descendant for all terms.
                         term=source_term,
                         attribute=portrait.relevant_constraints[attribute].pt,
                         options=descriptions,
+                        old_value=new_attribute_pt,
                         term_context="; ".join(portrait.context)
                         if portrait.context
                         else None,
@@ -2192,6 +2219,7 @@ Update existing attribute values with the most precise descendant for all terms.
                         break
 
                     new_attributes[attribute] = descriptions[value_term]
+                    new_attribute_pt = value_term
 
             portrait.attributes.update(new_attributes)
 
