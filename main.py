@@ -1386,7 +1386,7 @@ class OpenAIPrompter(Prompter):
 A prompter that interfaces with the OpenAI API using.
 """
 
-    DEFAULT_MODEL = "gpt-35-turbo"
+    DEFAULT_MODEL = "gpt-3.5-turbo"
 
     def __init__(
         self,
@@ -2296,6 +2296,10 @@ otherwise.
 
             case _:
                 raise ValueError("Invalid prompter option")
+
+        if not prompter.ping():
+            logging.error("Prompter API is not available!")
+            raise BouzygesError("Prompter API is not available")
 
         bouzyges = cls(
             snowstorm=snowstorm,
