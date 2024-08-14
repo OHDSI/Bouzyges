@@ -958,7 +958,9 @@ Outputs prompts as JSONs and contains sensible API option defaults.
                 "user",
                 (
                     f"Choose the value of the attribute '{attribute}' "
-                    f"in the term '{term}'."
+                    f"in the term '{term}'. The answer should be the best "
+                    f"matching option, either exact, or a likely supertype "
+                    f"of an actual value."
                 ),
             )
         )
@@ -1045,8 +1047,8 @@ Outputs prompts as JSONs and contains sensible API option defaults.
             (
                 "user",
                 f"""Options are:
- - {BooleanAnswer.YES}: The attribute is guaranteed present.
- - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.""",
+ - {BooleanAnswer.YES}: The term is a subtype of the concept.
+ - {BooleanAnswer.NO}: The term is not a subtype of the concept.""",
             )
         )
 
@@ -1738,7 +1740,7 @@ do
         # Check the assumption; if it fails, raise an error
         SUBSUMPTION = "<< "
         SCTID_ = r"(?P<sctid>\d{6,}) "  # Intentional capture group
-        TERM_ = r"\|(?P<term>.+?) \([a-z]+(?: [a-z]+)*\)\|"
+        TERM_ = r"\|(?P<term>.+?) \([a-z]+(?: (?:[a-z]+|\/))*\)\|"
         subsumption_constraint = re.compile(SUBSUMPTION + SCTID_ + TERM_)
 
         parents: dict[SCTID, SCTDescription] = {}
@@ -2282,7 +2284,10 @@ otherwise.
         # Load environment variables for API access
         if dotenv is not None:
             logging.info("Loading environment variables from .env")
-            dotenv.load_dotenv()
+            if os.path.exists(".env"):
+                dotenv.load_dotenv()
+            else:
+                logging.warning("No .env file found")
 
         snowstorm_endpoint = os.getenv("SNOWSTORM_ENDPOINT")
         if not snowstorm_endpoint:
@@ -2352,10 +2357,15 @@ otherwise.
 
         # Print resulting supertypes
         for term, portrait in self.portraits.items():
-            print(term, "supertypes:")
+            logging.info("Attributes:")
+            logging.info(f" - {term} attributes:")
+            for attribute, value in portrait.attributes.items():
+                logging.info(f"   - {attribute} {value}")
+
+            logging.info(f"{term} supertypes:")
             for anchor in portrait.ancestor_anchors:
                 ancestor = self.snowstorm.get_concept(anchor)
-                print(" -", ancestor.sctid, ancestor.pt)
+                logging.info(f" - {ancestor.sctid} {ancestor.pt}")
 
         logging.info(f"Started at: {start_time}")
         logging.info(
