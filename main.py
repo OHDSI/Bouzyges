@@ -94,6 +94,14 @@ T = TypeVar("T")
 
 
 ## Parameters
+DEFAULT_MODEL = "gpt-4o-mini"
+AVAILABLE_PROMPTERS: dict[PrompterOption, str] = {
+    "openai": "OpenAI",
+    "azure": "Azure OpenAI",
+    "human": "Human",
+}
+
+
 @dataclass
 class RunParameters:
     """\
@@ -104,6 +112,8 @@ Parameters for the run of the program.
     logging_level: int = logging.INFO
     stop_profiling_after_seconds: int | None = None
     prompter: PrompterOption = "openai"
+    snowstorm_url: URL = URL("https://localhost:8080")
+    llm_model_id: str = DEFAULT_MODEL
 
     def update(self, **kwargs):
         for key, value in kwargs.items():
@@ -111,15 +121,7 @@ Parameters for the run of the program.
         logging.basicConfig(level=self.logging_level)
 
 
-AVAILABLE_PROMPTERS: list[PrompterOption] = ["openai", "azure", "human"]
 PARAMS = RunParameters()
-PARAMS.update(
-    profiling=False,
-    logging_level=logging.INFO,
-    stop_profiling_after_seconds=None,
-    prompter="openai",
-)
-
 
 ## Logic constants
 ### MRCM
@@ -1413,17 +1415,15 @@ class OpenAIPrompter(Prompter):
 A prompter that interfaces with the OpenAI API using.
 """
 
-    DEFAULT_MODEL = "gpt-4o-mini"
-
     def __init__(
         self,
         *args,
-        model: str | None = None,
+        model: str,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
 
-        self._model_id = model or self.DEFAULT_MODEL
+        self._model_id = model
         self._init_client(*args, **kwargs)
 
         self._estimated_token_usage: dict[Prompt, int] = {}
@@ -1595,17 +1595,14 @@ class OpenAIAzurePrompter(OpenAIPrompter):
 A prompter that interfaces with the OpenAI API using Azure.
 """
 
-    DEFAULT_MODEL = "gpt-35-turbo"
     DEFAULT_VERSION = "2024-06-01"
 
-    def _init_client(
-        self, api_key: str, azure_endpoint: str, api_version: str | None
-    ):
+    def _init_client(self, api_key: str, azure_endpoint: str):
         logging.info("Initializing the Azure API client...")
         self._client = openai.AzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
-            api_version=api_version or self.DEFAULT_VERSION,
+            api_version=self.DEFAULT_VERSION,
         )
         self._ping_headers = {"api-key": self._client.api_key}
 
@@ -2311,15 +2308,20 @@ otherwise.
             else:
                 logging.warning("No .env file found")
 
-        snowstorm_endpoint = os.getenv("SNOWSTORM_ENDPOINT")
-        if not snowstorm_endpoint:
-            raise ValueError("SNOWSTORM_ENDPOINT variable is not set")
-        snowstorm = SnowstormAPI(URL(snowstorm_endpoint))
+        snowstorm_endpoint = PARAMS.snowstorm_url
+        try:
+            snowstorm = SnowstormAPI(snowstorm_endpoint)
+        except SnowstormAPIError as e:
+            logging.error("Could not connect to Snowstorm API:", e)
+            raise BouzygesError("Could not connect to Snowstorm API")
 
         prompter: Prompter
         match PARAMS.prompter:
             case "openai":
-                prompter = OpenAIPrompter(prompt_format=OpenAIPromptFormat())
+                prompter = OpenAIPrompter(
+                    prompt_format=OpenAIPromptFormat(),
+                    model=PARAMS.llm_model_id,
+                )
 
             case "azure":
                 azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -2328,7 +2330,7 @@ otherwise.
                     prompt_format=OpenAIPromptFormat(),
                     api_key=azure_api_key,
                     azure_endpoint=azure_api_endpoint,
-                    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+                    model=PARAMS.llm_model_id,
                 )
             case "human":
                 prompter = HumanPrompter(prompt_format=VerbosePromptFormat())
@@ -2491,31 +2493,64 @@ class BouzygesWindow(QtWidgets.QMainWindow):
 
     def __populate_option_contents(self, layout) -> None:
         # Prompter choice:
-        prompter_layout = QtWidgets.QHBoxLayout()
-        prompter_label = QtWidgets.QLabel("Prompter:")
-        prompter_options = QtWidgets.QComboBox()
-        prompter_options.addItems(["OpenAI", "Azure OpenAI", "Human"])
-        current_prompter_idx = AVAILABLE_PROMPTERS.index(PARAMS.prompter)
-        prompter_options.setCurrentIndex(current_prompter_idx)
-        prompter_options.currentIndexChanged.connect(self.prompter_changed)
-        prompter_layout.addWidget(prompter_label)
-        prompter_layout.addWidget(prompter_options)
+        prompter_layout = QtWidgets.QVBoxLayout()
 
+        ## Prompter imlementations
+        impl_layout = QtWidgets.QHBoxLayout()
+        impl_label = QtWidgets.QLabel("Prompter:")
+        impl_options = QtWidgets.QComboBox()
+        impl_options.addItems(AVAILABLE_PROMPTERS.values())
+        current_impl_idx = list(AVAILABLE_PROMPTERS).index(PARAMS.prompter)
+        impl_options.setCurrentIndex(current_impl_idx)
+        impl_options.currentIndexChanged.connect(self.prompter_changed)
+        impl_layout.addWidget(impl_label)
+        impl_layout.addWidget(impl_options)
+
+        ## Model id
+        model_layout = QtWidgets.QHBoxLayout()
+        model_label = QtWidgets.QLabel("Model ID:")
+        model_input = QtWidgets.QLineEdit()
+        model_input.setPlaceholderText(DEFAULT_MODEL)
+        model_input.setText(PARAMS.llm_model_id)
+        model_input.textChanged.connect(self.model_id_changed)
+        model_layout.addWidget(model_label)
+        model_layout.addWidget(model_input)
+
+        prompter_layout.addLayout(impl_layout)
+        prompter_layout.addLayout(model_layout)
+
+        # Snowstorm connection options
+        snowstorm_layout = QtWidgets.QVBoxLayout()
+        snowstorm_subtitle = QtWidgets.QLabel("Snowstorm API:")
+        snowstorm_subtitle.setStyleSheet("font-weight: bold;")
+        snowstorm_layout.addWidget(snowstorm_subtitle)
+        snowstorm_contents = QtWidgets.QVBoxLayout()
+        snowstorm_url_layout = QtWidgets.QHBoxLayout()
+        snowstorm_url_label = QtWidgets.QLabel("Endpoint URL:")
+        snowstorm_url_input = QtWidgets.QLineEdit()
+        snowstorm_url_input.setPlaceholderText("https://localhost:8080/")
+        snowstorm_url_input.setText(PARAMS.snowstorm_url)
+        snowstorm_url_input.textChanged.connect(self.snowstorm_url_changed)
+        snowstorm_url_layout.addWidget(snowstorm_url_label)
+        snowstorm_url_layout.addWidget(snowstorm_url_input)
+        snowstorm_contents.addLayout(snowstorm_url_layout)
+        snowstorm_layout.addLayout(snowstorm_contents)
+
+        # Developer options
         dev_label = QtWidgets.QLabel("Profiling and logging:")
-
+        dev_label.setStyleSheet("font-weight: bold;")
         dev_layout = QtWidgets.QHBoxLayout()
+
         profiling_layout = QtWidgets.QVBoxLayout()
-        profiling_label = QtWidgets.QLabel("Generate stats.prof file:")
-        profiling_checkbox = QtWidgets.QCheckBox("Profiling")
+        profiling_checkbox = QtWidgets.QCheckBox("Generate stats.prof file")
         profiling_checkbox.setChecked(PARAMS.profiling)
         profiling_checkbox.stateChanged.connect(self.profiling_changed)
-        profiling_layout.addWidget(profiling_label)
         profiling_layout.addWidget(profiling_checkbox)
 
         early_termination_layout = QtWidgets.QVBoxLayout()
         early_termination_label = QtWidgets.QLabel("Stop execution after:")
         early_termination_input = QtWidgets.QLineEdit()
-        early_termination_input.setPlaceholderText("Seconds, 0 for no limit")
+        early_termination_input.setPlaceholderText("Do not stop")
         if PARAMS.stop_profiling_after_seconds is not None:
             early_termination_input.setText(
                 str(PARAMS.stop_profiling_after_seconds)
@@ -2544,11 +2579,12 @@ class BouzygesWindow(QtWidgets.QMainWindow):
         dev_layout.addLayout(logging_level_layout)
 
         layout.addLayout(prompter_layout)
+        layout.addLayout(snowstorm_layout)
         layout.addWidget(dev_label)
         layout.addLayout(dev_layout)
 
     def prompter_changed(self, index) -> None:
-        new_prompter = AVAILABLE_PROMPTERS[index]
+        new_prompter = AVAILABLE_PROMPTERS[list(AVAILABLE_PROMPTERS)[index]]
         PARAMS.update(prompter=new_prompter)
         logging.info(f"Prompter changed to: {new_prompter}")
 
@@ -2575,6 +2611,19 @@ class BouzygesWindow(QtWidgets.QMainWindow):
         new_level = levels[index]
         logging.info(f"Logging level changed to: {new_level}")
         PARAMS.update(logging_level=new_level)
+
+    def snowstorm_url_changed(self, text) -> None:
+        if not text:
+            text = "https://localhost:8080/"
+        PARAMS.update(snowstorm_url=text)
+        logging.info(f"Snowstorm URL changed to: {text}")
+
+    def model_id_changed(self, text) -> None:
+        if not text:
+            text = DEFAULT_MODEL
+
+        PARAMS.update(llm_model_id=text)
+        logging.info(f"LLM model_id set to: {text}")
 
 
 def main():
