@@ -11,6 +11,7 @@ import re
 import requests
 import sqlite3
 import sys
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from frozendict import frozendict
@@ -127,6 +128,7 @@ Parameters for the run of the program.
     prompter: PrompterOption = "openai"
     snowstorm_url: URL = URL("http://localhost:8080/")
     llm_model_id: str = DEFAULT_MODEL
+    cache_db: str | None = "prompt_cache.db"
 
     # Environment variables
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
@@ -1112,14 +1114,14 @@ Interfaces prompts to the LLM agent and parses answers.
         self,
         *args,
         prompt_format: PromptFormat,
-        use_cache: bool = True,
         **kwargs,
     ):
         _ = args, kwargs
         self.prompt_format = prompt_format
         self.cache: PromptCache | None = None
-        if use_cache:
-            self.cache = PromptCache(sqlite3.connect("prompt_cache.db"))
+        if PARAMS.cache_db is not None:
+            conn = sqlite3.connect(PARAMS.cache_db, check_same_thread=False)
+            self.cache = PromptCache(conn)
 
     @staticmethod
     def unwrap_class_answer(
@@ -2452,6 +2454,10 @@ A logging handler that outputs log records to a QPlainTextEdit.
         if len(self._content) > self.max_records:
             self._content.pop(0)
         self.widget.setPlainText("\n".join(self._content))
+        # Scroll to the bottom
+        slider = self.widget.verticalScrollBar()
+        if slider:
+            slider.setValue(slider.maximum())
 
 
 class BouzygesWindow(QtWidgets.QMainWindow):
@@ -2544,9 +2550,24 @@ Main window and start config for the Bouzyges system.
         if dir:
             self.output_dir.setText(dir)
 
+    def select_cache_db(self):
+        file = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select cache database file",
+        )
+        if file:
+            self.input_file.setText(file[0])
+
     def spin_bouzyges(self) -> None:
         bouzyges = Bouzyges.prepare(terms=["Pyogenic abscess of liver"])
-        bouzyges.run()
+        # TODO: disable options widgets
+        thread = threading.Thread(target=bouzyges.run)
+        LOGGER.info("Starting Bouzyges thread")
+        thread.start()
+        while thread.is_alive():
+            QtWidgets.QApplication.processEvents()
+        LOGGER.info("Bouzyges thread finished")
+        thread.join()
 
     def __populate_option_contents(self, layout) -> None:
         # Prompter choice:
@@ -2593,13 +2614,31 @@ Main window and start config for the Bouzyges system.
         snowstorm_contents.addLayout(snowstorm_url_layout)
         snowstorm_layout.addLayout(snowstorm_contents)
 
+        # Sqlite database options
+        sqlite_layout = QtWidgets.QVBoxLayout()
+        sqlite_subtitle = QtWidgets.QLabel("Prompt cache path:")
+        sqlite_subtitle.setStyleSheet("font-weight: bold;")
+        sqlite_hint = QtWidgets.QLabel("Set to empty to disable")
+        sqlite_db_file = QtWidgets.QLineEdit()
+        sqlite_db_file.setPlaceholderText("prompt_cache.db")
+        sqlite_db_file.setText(PARAMS.cache_db)
+        sqlite_db_file.textChanged.connect(self.cache_db_changed)
+        sqlite_select = QtWidgets.QPushButton("Select")
+        sqlite_select.clicked.connect(self.select_cache_db)
+        sqlite_layout.addWidget(sqlite_subtitle)
+        sqlite_layout.addWidget(sqlite_hint)
+        sqlite_selector_layout = QtWidgets.QHBoxLayout()
+        sqlite_selector_layout.addWidget(sqlite_db_file)
+        sqlite_selector_layout.addWidget(sqlite_select)
+        sqlite_layout.addLayout(sqlite_selector_layout)
+
         # Developer options
         dev_label = QtWidgets.QLabel("Profiling and logging:")
         dev_label.setStyleSheet("font-weight: bold;")
         dev_layout = QtWidgets.QHBoxLayout()
 
         profiling_layout = QtWidgets.QVBoxLayout()
-        profiling_checkbox = QtWidgets.QCheckBox("Generate stats.prof file")
+        profiling_checkbox = QtWidgets.QCheckBox("Generate stats.prof")
         profiling_checkbox.setChecked(PARAMS.profiling)
         profiling_checkbox.stateChanged.connect(self.profiling_changed)
         profiling_layout.addWidget(profiling_checkbox)
@@ -2637,17 +2676,18 @@ Main window and start config for the Bouzyges system.
 
         layout.addLayout(prompter_layout)
         layout.addLayout(snowstorm_layout)
+        layout.addLayout(sqlite_layout)
         layout.addWidget(dev_label)
         layout.addLayout(dev_layout)
 
     def prompter_changed(self, index) -> None:
         new_prompter = AVAILABLE_PROMPTERS[list(AVAILABLE_PROMPTERS)[index]]
         PARAMS.update(prompter=new_prompter)
-        LOGGER.info(f"Prompter changed to: {new_prompter}")
+        LOGGER.debug(f"Prompter changed to: {new_prompter}")
 
     def profiling_changed(self, state) -> None:
         PARAMS.update(profiling=state == 2)
-        LOGGER.info(f"Profiling changed to: {state == 2}")
+        LOGGER.debug(f"Profiling changed to: {state == 2}")
 
     def et_changed(self, text) -> None:
         try:
@@ -2661,26 +2701,32 @@ Main window and start config for the Bouzyges system.
             new_et = None
 
         PARAMS.update(stop_profiling_after_seconds=None)
-        LOGGER.info(f"Early termination changed to: {new_et}")
+        LOGGER.debug(f"Early termination changed to: {new_et}")
 
     def ll_changed(self, index) -> None:
         levels = [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR]
         new_level = levels[index]
-        LOGGER.info(f"Logging level changed to: {new_level}")
+        LOGGER.debug(f"Logging level changed to: {new_level}")
         PARAMS.update(logging_level=new_level)
 
     def snowstorm_url_changed(self, text) -> None:
         if not text:
             text = "http://localhost:8080/"
         PARAMS.update(snowstorm_url=text)
-        LOGGER.info(f"Snowstorm URL changed to: {text}")
+        LOGGER.debug(f"Snowstorm URL changed to: {text}")
 
     def model_id_changed(self, text) -> None:
         if not text:
             text = DEFAULT_MODEL
 
         PARAMS.update(llm_model_id=text)
-        LOGGER.info(f"LLM model_id set to: {text}")
+        LOGGER.debug(f"LLM model_id set to: {text}")
+
+    def cache_db_changed(self, text) -> None:
+        if not text:
+            text = None
+        PARAMS.update(cache_db=text)
+        LOGGER.debug(f"Cache database path changed to: {text}")
 
 
 def main():
