@@ -87,7 +87,7 @@ $ python bouzyges.py
 
 # License
 
-The code is not yet licensed and is provided as-is. The code is provided for educational purposes only and is not intended for production use.
+The code is not yet licensed and is provided as-is. The code is provided for educational purposes only and is not intended for production use. Please refrain from disributing the code or using it in any commercial or production environment.
 
 # Current work in progress
 

@@ -29,6 +29,9 @@ psutil==6.0.0
 pydantic==2.8.2
 pydantic_core==2.20.1
 Pygments==2.18.0
+PyQt6==6.7.1
+PyQt6-Qt6==6.7.2
+PyQt6_sip==13.8.0
 python-dotenv==1.0.1
 PyYAML==6.0.2
 regex==2024.7.24
