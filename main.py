@@ -92,6 +92,19 @@ OpenAIPromptRole = Literal["user", "system", "assisstant"]
 OpenAIMessages = tuple[frozendict[OpenAIPromptRole, str]]
 T = TypeVar("T")
 
+## Logging
+LOGGER = logging.getLogger("Bouzyges")
+logging.basicConfig(level=logging.INFO)
+LOGGER.info("Logging started")
+# Default handler and formatter
+_handler = logging.StreamHandler(sys.stdout)
+_formatter = logging.Formatter(
+    "[%(asctime)s] %(levelname)s [%(name)s.%(funcName)s:%(lineno)d] "
+    "%(message)s"
+)
+_handler.setFormatter(_formatter)
+LOGGER.addHandler(_handler)
+LOGGER.info("Logging configured")
 
 ## Parameters
 DEFAULT_MODEL = "gpt-4o-mini"
@@ -112,13 +125,18 @@ Parameters for the run of the program.
     logging_level: int = logging.INFO
     stop_profiling_after_seconds: int | None = None
     prompter: PrompterOption = "openai"
-    snowstorm_url: URL = URL("https://localhost:8080")
+    snowstorm_url: URL = URL("http://localhost:8080/")
     llm_model_id: str = DEFAULT_MODEL
+
+    # Environment variables
+    openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
+    azure_api_key: str | None = os.getenv("AZURE_OPENAI_API_KEY")
+    azure_api_endpoint: str | None = os.getenv("AZURE_OPENAI_ENDPOINT")
 
     def update(self, **kwargs):
         for key, value in kwargs.items():
             setattr(self, key, value)
-        logging.basicConfig(level=self.logging_level)
+        LOGGER.setLevel(level=self.logging_level)
 
 
 PARAMS = RunParameters()
@@ -425,11 +443,11 @@ class SnowstormRequestError(SnowstormAPIError):
 
     @classmethod
     def from_response(cls, response):
-        logging.error(
+        LOGGER.error(
             f"Request: {response.request.method}, {response.request.url}"
         )
         if response:
-            logging.error(f"Response: {json.dumps(response.json(), indent=2)}")
+            LOGGER.error(f"Response: {json.dumps(response.json(), indent=2)}")
         return cls(
             f"Snowstorm API returned {response.status_code} status code",
             response,
@@ -1201,7 +1219,7 @@ Prompt the model to choose the best matching proximal ancestor for a term.
         prompt: Prompt = self.prompt_format.form_supertype(
             term, options, allow_escape, term_context, options_context
         )
-        logging.debug(f"Constructed prompt: f{prompt.prompt_message}")
+        LOGGER.debug(f"Constructed prompt: f{prompt.prompt_message}")
 
         # Try the cache
         if cached_answer := self.cache_get(prompt):
@@ -1210,12 +1228,12 @@ Prompt the model to choose the best matching proximal ancestor for a term.
                 options,
                 EscapeHatch.WORD if allow_escape else None,
             )
-            logging.info(f"From cache: {answer} is a supertype of {term}")
+            LOGGER.info(f"From cache: {answer} is a supertype of {term}")
             return answer
 
         # Get the answer
         answer = self._prompt_class_answer(allow_escape, options, prompt)
-        logging.info(f"Agent answer: {answer} is a supertype of {term}")
+        LOGGER.info(f"Agent answer: {answer} is a supertype of {term}")
         return answer
 
     def prompt_attr_presence(
@@ -1231,14 +1249,14 @@ Prompt the model to choose the best matching proximal ancestor for a term.
 
         if cached_answer := self.cache_get(prompt):
             answer = self.unwrap_bool_answer(cached_answer)
-            logging.info(
+            LOGGER.info(
                 f"From cache: The attribute '{attribute}' is "
                 f"{'present' if answer else 'absent'} in '{term}'"
             )
             return answer
 
         answer = self._prompt_bool_answer(prompt)
-        logging.info(
+        LOGGER.info(
             f"Agent answer: The attribute '{attribute}' is "
             f"{'present' if answer else 'absent'} in '{term}'"
         )
@@ -1273,14 +1291,14 @@ Prompt the model to choose the value of an attribute in a term.
                 options,
                 EscapeHatch.WORD if allow_escape else None,
             )
-            logging.info(
+            LOGGER.info(
                 f"From cache: The value of the attribute '{attribute}' in "
                 f"'{term}' is '{answer}'"
             )
             return answer
 
         answer = self._prompt_class_answer(allow_escape, options, prompt)
-        logging.info(
+        LOGGER.info(
             f"Agent answer: The value of the attribute '{attribute}' in "
             f"'{term}' is '{answer}'"
         )
@@ -1305,7 +1323,7 @@ Fully Defined concepts.
 
         if cached_answer := self.cache_get(prompt):
             answer = self.unwrap_bool_answer(cached_answer)
-            logging.info(
+            LOGGER.info(
                 f"From cache: The term '{term}' is "
                 f"{'a subtype' if answer else 'not a subtype'}"
                 f"of '{prospective_supertype}'"
@@ -1313,7 +1331,7 @@ Fully Defined concepts.
             return answer
 
         answer = self._prompt_bool_answer(prompt)
-        logging.info(
+        LOGGER.info(
             f"From cache: The term '{term}' is "
             f"{'a subtype' if answer else 'not a subtype'}"
             f"of '{prospective_supertype}'"
@@ -1369,10 +1387,13 @@ A test prompter that interacts with a human to get answers.
 
     _model_id = "human"
 
+    def __init__(self, *args, prompt_function: Callable[[str], str], **kwargs):
+        super().__init__(*args, **kwargs)
+        self.prompt_function = prompt_function
+
     def _prompt_class_answer(self, allow_escape, options, prompt):
         while True:
-            print(prompt.prompt_message)
-            brain_answer = input("Answer: ").strip()
+            brain_answer = self.prompt_function("Answer: ").strip()
             try:
                 answer = self.unwrap_class_answer(
                     brain_answer,
@@ -1383,28 +1404,24 @@ A test prompter that interacts with a human to get answers.
                 return answer
 
             except PrompterError as e:
-                print("Error:", e)
-                print("Please, provide an answer in the requested format.")
+                logging.error("Error: %s", e)
 
     def _prompt_bool_answer(self, prompt: Prompt) -> bool:
         while True:
-            print(prompt.prompt_message)
-            brain_answer = input("Answer: ").strip()
+            brain_answer = self.prompt_function("Answer: ").strip()
             try:
                 answer = self.unwrap_bool_answer(brain_answer)
                 self.cache_remember(prompt, brain_answer)
                 return answer
             except PrompterError as e:
-                print("Error:", e)
-                print("Please, provide an answer in the requested format.")
+                logging.error("Error: %s", e)
 
     def ping(self) -> bool:
-        input("Hey, are you here? (Press Enter) ")
-        print("Good human.")
+        self.prompt_function("Press Enter to confirm you are here")
         return True
 
     def report_usage(self) -> None:
-        logging.info(
+        LOGGER.info(
             "No usage to report, as this is a human prompter. Stay "
             "hydrated and have a good day!"
         )
@@ -1434,14 +1451,14 @@ A prompter that interfaces with the OpenAI API using.
                     self._model_id
                 )
             except KeyError:
-                logging.warning("Model not found in the token")
+                LOGGER.warning("Model not found in the token")
                 self._estimation_encoding = None
         else:
-            logging.warning("Tiktoken not installed, can't track token usage")
+            LOGGER.warning("Tiktoken not installed, can't track token usage")
             self._estimation_encoding = None
 
     def _init_client(self, *args, **kwargs):
-        logging.info("Initializing the OpenAI API client...")
+        LOGGER.info("Initializing the OpenAI API client...")
         _ = args, kwargs
         # API Key will be picked up from env variables
         # self._api_key = api_key
@@ -1454,7 +1471,7 @@ A prompter that interfaces with the OpenAI API using.
         self._ping_headers = {}
 
     def ping(self) -> bool:
-        logging.info("Pinging the OpenAI API...")
+        LOGGER.info("Pinging the OpenAI API...")
         # Ping by retrieving the list of models
         try:
             models = self._client.models.list(
@@ -1462,21 +1479,21 @@ A prompter that interfaces with the OpenAI API using.
             )
 
         except openai.APITimeoutError:
-            logging.warning("Connection timed out")
+            LOGGER.warning("Connection timed out")
             return False
         response: dict = models.model_dump()
         success = response.get("data", []) != []
         if success:
-            logging.info("API is available")
-            logging.debug(f"Models: {json.dumps(response["data"], indent=2)}")
+            LOGGER.info("API is available")
+            LOGGER.debug(f"Models: {json.dumps(response["data"], indent=2)}")
             if not any(self._model_id == obj["id"] for obj in response["data"]):
-                logging.warning(
+                LOGGER.warning(
                     f"'{self._model_id}' is not present in the API response!"
                 )
                 return False
             return True
 
-        logging.warning("API is not available")
+        LOGGER.warning("API is not available")
         return False
 
     def _prompt_bool_answer(self, prompt: Prompt) -> bool:
@@ -1493,15 +1510,15 @@ A prompter that interfaces with the OpenAI API using.
     def _prompt_answer(
         self, prompt: Prompt, parser: Callable[[str], T], parse_retries_left=3
     ) -> T:
-        logging.info("Trying cache for answer...")
+        LOGGER.info("Trying cache for answer...")
         if cached_answer := self.cache_get(prompt):
             answer = parser(cached_answer)
-            logging.info("Cache hit!")
+            LOGGER.info("Cache hit!")
             return answer
         else:
-            logging.info("Cache miss")
+            LOGGER.info("Cache miss")
 
-        logging.info("Prompting the OpenAI API for an answer...")
+        LOGGER.info("Prompting the OpenAI API for an answer...")
 
         if self._estimation_encoding:
             token_count = len(
@@ -1510,11 +1527,11 @@ A prompter that interfaces with the OpenAI API using.
                 )
             )
             self._estimated_token_usage[prompt] = token_count
-            logging.debug(f"Estimated token usage for prompt: {token_count}")
+            LOGGER.debug(f"Estimated token usage for prompt: {token_count}")
         else:
-            logging.warning("Token usage will not be estimated: unknown model")
+            LOGGER.warning("Token usage will not be estimated: unknown model")
 
-        logging.debug(
+        LOGGER.debug(
             f"Prompt message {json.dumps(prompt.prompt_message, indent=2)}"
         )
 
@@ -1535,7 +1552,7 @@ A prompter that interfaces with the OpenAI API using.
                 **(prompt.api_options or {}),
             )
         except openai.APIError as e:
-            logging.error(f"API error: {e}")
+            LOGGER.error(f"API error: {e}")
             raise PrompterError("Failed to get a response from the API")
 
         response_message = brain_answer.choices[0].message.content
@@ -1546,22 +1563,22 @@ A prompter that interfaces with the OpenAI API using.
             self._estimated_token_usage[prompt] = (
                 self._estimated_token_usage.get(prompt, 0) + token_count
             )
-            logging.debug(f"Estimated token usage for answer: {token_count}")
+            LOGGER.debug(f"Estimated token usage for answer: {token_count}")
 
         self._actual_token_usage[prompt] = (
             self._actual_token_usage.get(prompt, 0)
             + brain_answer.usage.total_tokens
         )
 
-        logging.debug(f"Literal response: {response_message}")
+        LOGGER.debug(f"Literal response: {response_message}")
         try:
             answer = parser(response_message)
             self.cache_remember(prompt, response_message)
             return answer
         except PrompterError as e:
-            logging.error(f"Error parsing response: {e}")
+            LOGGER.error(f"Error parsing response: {e}")
             if parse_retries_left > 0:
-                logging.warning(
+                LOGGER.warning(
                     f"Retrying parsing the answer, "
                     f"attempts left: {parse_retries_left}"
                 )
@@ -1571,20 +1588,20 @@ A prompter that interfaces with the OpenAI API using.
             raise PrompterError("Failed to parse the answer")
 
     def report_usage(self) -> None:
-        logging.info("Reporting usage to the OpenAI API...")
+        LOGGER.info("Reporting usage to the OpenAI API...")
         if self._estimated_token_usage:
             n_prompts = len(self._estimated_token_usage)
             total_tokens = sum(self._estimated_token_usage.values())
-            logging.info(
+            LOGGER.info(
                 f"Estimation: reporting {n_prompts} prompts with a total of "
                 f"{total_tokens} tokens"
             )
         else:
-            logging.warning("No estimation of token usage to report")
+            LOGGER.warning("No estimation of token usage to report")
 
         n_prompts = len(self._actual_token_usage)
         total_tokens = sum(self._actual_token_usage.values())
-        logging.info(
+        LOGGER.info(
             f"Actual: reporting {n_prompts} prompts with a total of "
             f"{total_tokens} tokens"
         )
@@ -1598,7 +1615,7 @@ A prompter that interfaces with the OpenAI API using Azure.
     DEFAULT_VERSION = "2024-06-01"
 
     def _init_client(self, api_key: str, azure_endpoint: str):
-        logging.info("Initializing the Azure API client...")
+        LOGGER.info("Initializing the Azure API client...")
         self._client = openai.AzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
@@ -1647,9 +1664,7 @@ raises an exception on non-200 responses.
         try:
             response = requests.get(*args, **kwargs)
         except requests.exceptions.RequestException as e:
-            raise SnowstormRequestError(
-                "Could not connect to Snowstorm API:", e
-            )
+            raise BouzygesError(f"Could not connect to Snowstorm API: {e}")
 
         if not response.ok:
             raise SnowstormRequestError.from_response(response)
@@ -1776,7 +1791,7 @@ do
                 failure = True
 
             if failure:
-                logging.error(f"{rc} is not a simple disjunction of SCTIDs!")
+                LOGGER.error(f"{rc} is not a simple disjunction of SCTIDs!")
                 raise NotImplementedError
 
         # If there is more than one available parent, remove the root
@@ -1799,7 +1814,7 @@ do
                     return self._range_constraint_to_parents(r.range_constraint)
 
         # No range of allowed content types found!
-        logging.warning(f"No range constraint found for {attribute}")
+        LOGGER.warning(f"No range constraint found for {attribute}")
         return {}
 
     def get_concept_children(
@@ -1955,7 +1970,7 @@ Note that subsumption is checked for concepts regardless of definition status;
 Primitive concepts will report subsumption as True, but it needs to be confirmed
 manually/with LLM.
 """
-        logging.debug(
+        LOGGER.debug(
             "Checking subsumption for "
             + portrait.source_term
             + " under "
@@ -1975,7 +1990,7 @@ manually/with LLM.
             unmatched_predicate_ppp -= matched_ppp
 
         if unmatched_predicate_ppp:
-            logging.debug(
+            LOGGER.debug(
                 f"Does not satisfy {len(unmatched_predicate_ppp)} "
                 f"PPP constraints"
             )
@@ -2000,12 +2015,12 @@ manually/with LLM.
                 break
 
         if unmatched := len(unmatched_concept_relationships):
-            logging.debug(f"Does not satisfy {unmatched} attribute constraints")
+            LOGGER.debug(f"Does not satisfy {unmatched} attribute constraints")
             return False
 
-        logging.debug("All constraints are satisfied")
+        LOGGER.debug("All constraints are satisfied")
         if not parent_predicate.defined:
-            logging.debug(
+            LOGGER.debug(
                 "Concept is primitive: subsumption must be confirmed manually"
             )
         return True
@@ -2035,13 +2050,13 @@ Main logic host for the Bouzyges system.
                 for term, context in zip(terms, contexts)
             }
 
-        logging.info("Snowstorm Version: " + snowstorm.get_version())
-        logging.info("Using branch path: " + snowstorm.branch_path)
+        LOGGER.info("Snowstorm Version: " + snowstorm.get_version())
+        LOGGER.info("Using branch path: " + snowstorm.branch_path)
 
         # Load MRCM entries
-        logging.info("MRCM Domain Reference Set entries:")
+        LOGGER.info("MRCM Domain Reference Set entries:")
         domain_entries = snowstorm.get_mrcm_domain_reference_set_entries()
-        logging.info(f"Total entries: {len(domain_entries)}")
+        LOGGER.info(f"Total entries: {len(domain_entries)}")
         self.mrcm_entries = [
             MRCMDomainRefsetEntry.from_json(entry)
             for entry in domain_entries
@@ -2050,9 +2065,9 @@ Main logic host for the Bouzyges system.
         ]
 
         for entry in self.mrcm_entries:
-            logging.info(" - " + entry.term + ":")
-            logging.info("    - " + entry.domain_constraint)
-            logging.info("    - " + entry.guide_link)
+            LOGGER.info(" - " + entry.term + ":")
+            LOGGER.info("    - " + entry.domain_constraint)
+            LOGGER.info("    - " + entry.guide_link)
 
         # Initialize supertypes
         self.initialize_supertypes()
@@ -2082,7 +2097,7 @@ Initialize supertypes for all terms to start building portraits.
             match supertype_term:
                 case SCTDescription(answer_term):
                     supertype = supertypes_decode[answer_term]
-                    logging.info(f"Assuming {source_term} is {answer_term}")
+                    LOGGER.info(f"Assuming {source_term} is {answer_term}")
                     portrait.ancestor_anchors.add(supertype)
                 case _:
                     raise BouzygesError(
@@ -2100,9 +2115,9 @@ Initialize supertypes for all terms to start building portraits.
             for attribute in portrait.rejected_attributes:
                 attributes.pop(attribute, None)
 
-            logging.debug("Possible attributes for: " + term)
+            LOGGER.debug("Possible attributes for: " + term)
             for sctid, attribute in attributes.items():
-                logging.debug(f" - {sctid} {attribute.pt}")
+                LOGGER.debug(f" - {sctid} {attribute.pt}")
 
             # Confirm the attributes
             for attribute in attributes.values():
@@ -2113,7 +2128,7 @@ Initialize supertypes for all terms to start building portraits.
                     if portrait.context
                     else None,
                 )
-                logging.info(
+                LOGGER.info(
                     f"{attribute.sctid} {attribute.pt}: " + "Present"
                     if accept
                     else "Not present"
@@ -2132,21 +2147,21 @@ Initialize supertypes for all terms to start building portraits.
         for portrait in self.portraits.values():
             rejected = set()
             for attribute in portrait.unchecked_attributes:
-                logging.debug(f"Attribute: {attribute}")
+                LOGGER.debug(f"Attribute: {attribute}")
                 # Get possible attribute values
                 values_options = self.snowstorm.get_attribute_values(
                     portrait, attribute
                 )
-                logging.debug(f"Values: {values_options}")
+                LOGGER.debug(f"Values: {values_options}")
 
                 if not values_options:
                     # No valid values for this attribute and parent combination
                     rejected.add(attribute)
                     continue
                 else:
-                    logging.info(f"Possible values for: {attribute}")
+                    LOGGER.info(f"Possible values for: {attribute}")
                     for value in values_options:
-                        logging.info(f" - {value}")
+                        LOGGER.info(f" - {value}")
 
                 # Prompt for the value
                 value_term = self.prompter.prompt_attr_value(
@@ -2221,7 +2236,7 @@ Update existing attribute values with the most precise descendant for all terms.
         while ancestors_changed:
             ancestors_changed = self.__update_anchor(portrait)
             i += ancestors_changed
-        logging.info(f"Updated {source_term} anchors in {i} iterations.")
+        LOGGER.info(f"Updated {source_term} anchors in {i} iterations.")
         return i > 1
 
     def __update_anchor(
@@ -2237,7 +2252,7 @@ otherwise.
         for anchor in portrait.ancestor_anchors:
             # Get all immediate descendants
             children = self.snowstorm.get_concept_children(anchor)
-            logging.debug(f"Filtering {len(children)} children of {anchor}")
+            LOGGER.debug(f"Filtering {len(children)} children of {anchor}")
 
             # Remove verbatim known ancestors
             for known_ancestor in portrait.ancestor_anchors:
@@ -2256,7 +2271,7 @@ otherwise.
             for child in set(children) - remaining:
                 del children[child]
 
-            logging.debug(f"Filtered to {len(children)}")
+            LOGGER.debug(f"Filtered to {len(children)}")
 
             # Iterate over descendants and ask LLM/Snowstorm if to include them
             # to the new anchors
@@ -2288,11 +2303,11 @@ otherwise.
                 new_anchors.add(child_id)
 
         if not new_anchors:
-            logging.debug("No new ancestors found")
+            LOGGER.debug("No new ancestors found")
             return False
 
         # Update the anchor set with the new one
-        logging.debug(
+        LOGGER.debug(
             f"New ancestors: {new_anchors - portrait.ancestor_anchors}"
         )
         portrait.ancestor_anchors |= new_anchors
@@ -2302,17 +2317,17 @@ otherwise.
     def prepare(cls, terms: Iterable[str]) -> Self:
         # Load environment variables for API access
         if dotenv is not None:
-            logging.info("Loading environment variables from .env")
+            LOGGER.info("Loading environment variables from .env")
             if os.path.exists(".env"):
                 dotenv.load_dotenv()
             else:
-                logging.warning("No .env file found")
+                LOGGER.warning("No .env file found")
 
         snowstorm_endpoint = PARAMS.snowstorm_url
         try:
             snowstorm = SnowstormAPI(snowstorm_endpoint)
         except SnowstormAPIError as e:
-            logging.error("Could not connect to Snowstorm API:", e)
+            LOGGER.error("Could not connect to Snowstorm API:", e)
             raise BouzygesError("Could not connect to Snowstorm API")
 
         prompter: Prompter
@@ -2324,22 +2339,22 @@ otherwise.
                 )
 
             case "azure":
-                azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-                azure_api_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
                 prompter = OpenAIAzurePrompter(
                     prompt_format=OpenAIPromptFormat(),
-                    api_key=azure_api_key,
-                    azure_endpoint=azure_api_endpoint,
+                    api_key=PARAMS.azure_api_key,
+                    azure_endpoint=PARAMS.azure_api_endpoint,
                     model=PARAMS.llm_model_id,
                 )
             case "human":
-                prompter = HumanPrompter(prompt_format=VerbosePromptFormat())
+                prompter = HumanPrompter(
+                    prompt_function=input, prompt_format=VerbosePromptFormat()
+                )
 
             case _:
                 raise ValueError("Invalid prompter option")
 
         if not prompter.ping():
-            logging.error("Prompter API is not available!")
+            LOGGER.error("Prompter API is not available!")
             raise BouzygesError("Prompter API is not available")
 
         bouzyges = cls(
@@ -2352,20 +2367,20 @@ otherwise.
     def _run(self):
         """Main routine"""
         start_time = datetime.datetime.now()
-        logging.info(f"Started at: {start_time}")
+        LOGGER.info(f"Started at: {start_time}")
 
         if not self.prompter.ping():
-            logging.error("API is not available!")
+            LOGGER.error("API is not available!")
             raise BouzygesError("API is not available")
 
         self.populate_attribute_candidates()
         self.populate_unchecked_attributes()
         self.update_existing_attr_values()
-        logging.info("Attributes:")
+        LOGGER.info("Attributes:")
         for term, portrait in self.portraits.items():
-            logging.info(f" - {term} attributes:")
+            LOGGER.info(f" - {term} attributes:")
             for attribute, value in portrait.attributes.items():
-                logging.info(f"   - {attribute} {value}")
+                LOGGER.info(f"   - {attribute} {value}")
 
         for term, portrait in self.portraits.items():
             changes_made = updated = True
@@ -2381,18 +2396,18 @@ otherwise.
 
         # Print resulting supertypes
         for term, portrait in self.portraits.items():
-            logging.info("Attributes:")
-            logging.info(f" - {term} attributes:")
+            LOGGER.info("Attributes:")
+            LOGGER.info(f" - {term} attributes:")
             for attribute, value in portrait.attributes.items():
-                logging.info(f"   - {attribute} {value}")
+                LOGGER.info(f"   - {attribute} {value}")
 
-            logging.info(f"{term} supertypes:")
+            LOGGER.info(f"{term} supertypes:")
             for anchor in portrait.ancestor_anchors:
                 ancestor = self.snowstorm.get_concept(anchor)
-                logging.info(f" - {ancestor.sctid} {ancestor.pt}")
+                LOGGER.info(f" - {ancestor.sctid} {ancestor.pt}")
 
-        logging.info(f"Started at: {start_time}")
-        logging.info(
+        LOGGER.info(f"Started at: {start_time}")
+        LOGGER.info(
             f"Time taken (s): "
             f"{(datetime.datetime.now() - start_time).total_seconds()}"
         )
@@ -2415,12 +2430,42 @@ Run the Bouzyges system.
         self.prompter.report_usage()
 
 
+# https://stackoverflow.com/questions/28655198/best-way-to-display-logs-in-pyqt
+class BouzygesLoggingSpace(logging.Handler):
+    """\
+A logging handler that outputs log records to a QPlainTextEdit.
+"""
+
+    max_records = 2000
+
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.widget = QtWidgets.QPlainTextEdit(*args, **kwargs)
+        self.widget.setReadOnly(True)
+        self._content: list[str] = []
+
+        self.setFormatter(_formatter)
+
+    def emit(self, record):
+        msg = self.format(record)
+        self._content.append(msg)
+        if len(self._content) > self.max_records:
+            self._content.pop(0)
+        self.widget.setPlainText("\n".join(self._content))
+
+
 class BouzygesWindow(QtWidgets.QMainWindow):
+    """\
+Main window and start config for the Bouzyges system.
+"""
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setWindowTitle("OHDSI Bouzyges")
         layout = QtWidgets.QVBoxLayout()
+        self.populate_layout(layout)
 
+    def populate_layout(self, layout):
         # Options
         options_layout = QtWidgets.QVBoxLayout()
         options_subtitle = QtWidgets.QLabel("Options")
@@ -2462,10 +2507,22 @@ class BouzygesWindow(QtWidgets.QMainWindow):
         run_button.clicked.connect(self.spin_bouzyges)
         run_layout.addWidget(run_button)
 
+        # Logging space
+        logging_layout = QtWidgets.QVBoxLayout()
+        logging_subtitle = QtWidgets.QLabel("Logging")
+        logging_subtitle.setStyleSheet("font-weight: bold;")
+        self.log_display = BouzygesLoggingSpace()
+        LOGGER.addHandler(self.log_display)
+        LOGGER.info("Logging to GUI is initialized")
+        log_widget = self.log_display.widget
+        logging_layout.addWidget(logging_subtitle)
+        logging_layout.addWidget(log_widget)
+
         layout.addLayout(options_layout)
         layout.addLayout(input_layout)
         layout.addLayout(output_layout)
         layout.addLayout(run_layout)
+        layout.addLayout(logging_layout)
 
         widget = QtWidgets.QWidget()
         widget.setLayout(layout)
@@ -2528,7 +2585,7 @@ class BouzygesWindow(QtWidgets.QMainWindow):
         snowstorm_url_layout = QtWidgets.QHBoxLayout()
         snowstorm_url_label = QtWidgets.QLabel("Endpoint URL:")
         snowstorm_url_input = QtWidgets.QLineEdit()
-        snowstorm_url_input.setPlaceholderText("https://localhost:8080/")
+        snowstorm_url_input.setPlaceholderText("http://localhost:8080/")
         snowstorm_url_input.setText(PARAMS.snowstorm_url)
         snowstorm_url_input.textChanged.connect(self.snowstorm_url_changed)
         snowstorm_url_layout.addWidget(snowstorm_url_label)
@@ -2586,44 +2643,44 @@ class BouzygesWindow(QtWidgets.QMainWindow):
     def prompter_changed(self, index) -> None:
         new_prompter = AVAILABLE_PROMPTERS[list(AVAILABLE_PROMPTERS)[index]]
         PARAMS.update(prompter=new_prompter)
-        logging.info(f"Prompter changed to: {new_prompter}")
+        LOGGER.info(f"Prompter changed to: {new_prompter}")
 
     def profiling_changed(self, state) -> None:
         PARAMS.update(profiling=state == 2)
-        logging.info(f"Profiling changed to: {state == 2}")
+        LOGGER.info(f"Profiling changed to: {state == 2}")
 
     def et_changed(self, text) -> None:
         try:
             new_et = int(text)
         except ValueError:
             PARAMS.update(stop_profiling_after_seconds=None)
-            logging.warning("Invalid input for early termination, resetting")
+            LOGGER.warning("Invalid input for early termination, resetting")
             return
 
         if new_et <= 0:
             new_et = None
 
         PARAMS.update(stop_profiling_after_seconds=None)
-        logging.info(f"Early termination changed to: {new_et}")
+        LOGGER.info(f"Early termination changed to: {new_et}")
 
     def ll_changed(self, index) -> None:
         levels = [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR]
         new_level = levels[index]
-        logging.info(f"Logging level changed to: {new_level}")
+        LOGGER.info(f"Logging level changed to: {new_level}")
         PARAMS.update(logging_level=new_level)
 
     def snowstorm_url_changed(self, text) -> None:
         if not text:
-            text = "https://localhost:8080/"
+            text = "http://localhost:8080/"
         PARAMS.update(snowstorm_url=text)
-        logging.info(f"Snowstorm URL changed to: {text}")
+        LOGGER.info(f"Snowstorm URL changed to: {text}")
 
     def model_id_changed(self, text) -> None:
         if not text:
             text = DEFAULT_MODEL
 
         PARAMS.update(llm_model_id=text)
-        logging.info(f"LLM model_id set to: {text}")
+        LOGGER.info(f"LLM model_id set to: {text}")
 
 
 def main():
