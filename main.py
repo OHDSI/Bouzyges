@@ -6,9 +6,11 @@ import logging
 import openai
 import os
 import pstats
+from PyQt6 import QtWidgets
 import re
 import requests
 import sqlite3
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from frozendict import frozendict
@@ -2325,7 +2327,7 @@ otherwise.
         )
         return bouzyges
 
-    def run(self):
+    def _run(self):
         """Main routine"""
         start_time = datetime.datetime.now()
         logging.info(f"Started at: {start_time}")
@@ -2373,18 +2375,107 @@ otherwise.
             f"{(datetime.datetime.now() - start_time).total_seconds()}"
         )
 
+    def run(self):
+        """\
+Run the Bouzyges system.
+"""
+        if PROFILING:
+            with cProfile.Profile() as prof:
+                try:
+                    self._run()
+                except ProfileMark:
+                    pass
+            stats = pstats.Stats(prof)
+            stats.sort_stats(pstats.SortKey.TIME)
+            stats.dump_stats("stats.prof")
+        else:
+            self._run()
+        self.prompter.report_usage()
+
+
+class BouzygesWindow(QtWidgets.QMainWindow):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setWindowTitle("OHDSI Bouzyges")
+        layout = QtWidgets.QVBoxLayout()
+
+        # Options
+        options_layout = QtWidgets.QVBoxLayout()
+        options_subtitle = QtWidgets.QLabel("Options")
+        options_subtitle.setStyleSheet("font-weight: bold;")
+        options_layout.addWidget(options_subtitle)
+        options_contents = QtWidgets.QHBoxLayout()
+        # TODO: Add options
+        options_layout.addLayout(options_contents)
+
+        # Input file selection
+        input_layout = QtWidgets.QVBoxLayout()
+        input_subtitle = QtWidgets.QLabel("Input file")
+        input_subtitle.setStyleSheet("font-weight: bold;")
+        input_layout.addWidget(input_subtitle)
+        input_contents = QtWidgets.QHBoxLayout()
+        self.input_file = QtWidgets.QLineEdit()
+        input_contents.addWidget(self.input_file)
+        input_select = QtWidgets.QPushButton("Select")
+        input_select.clicked.connect(self.select_input)
+        input_contents.addWidget(input_select)
+        input_layout.addLayout(input_contents)
+
+        # Output directory selection
+        output_layout = QtWidgets.QVBoxLayout()
+        output_subtitle = QtWidgets.QLabel("Output directory")
+        output_subtitle.setStyleSheet("font-weight: bold;")
+        output_layout.addWidget(output_subtitle)
+        output_contents = QtWidgets.QHBoxLayout()
+        self.output_dir = QtWidgets.QLineEdit()
+        output_contents.addWidget(self.output_dir)
+        output_select = QtWidgets.QPushButton("Select")
+        output_select.clicked.connect(self.select_output)
+        output_contents.addWidget(output_select)
+        output_layout.addLayout(output_contents)
+
+        # Run button
+        run_layout = QtWidgets.QHBoxLayout()
+        run_button = QtWidgets.QPushButton("Run")
+        run_button.clicked.connect(self.spin_bouzyges)
+        run_layout.addWidget(run_button)
+
+        layout.addLayout(options_layout)
+        layout.addLayout(input_layout)
+        layout.addLayout(output_layout)
+        layout.addLayout(run_layout)
+
+        widget = QtWidgets.QWidget()
+        widget.setLayout(layout)
+        self.setCentralWidget(widget)
+
+    def select_input(self):
+        file = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select input CSV file",
+        )
+        if file:
+            self.input_file.setText(file[0])
+
+    def select_output(self):
+        dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select directory for output",
+        )
+        if dir:
+            self.output_dir.setText(dir)
+
+    def spin_bouzyges(self):
+        bouzyges = Bouzyges.prepare(terms=["Pyogenic abscess of liver"])
+        bouzyges.run()
+
+
+def main():
+    app = QtWidgets.QApplication(sys.argv)
+    window = BouzygesWindow()
+    window.show()
+    sys.exit(app.exec())
+
 
 if __name__ == "__main__":
-    bouzyges = Bouzyges.prepare(terms=["Pyogenic abscess of liver"])
-    if PROFILING:
-        with cProfile.Profile() as prof:
-            try:
-                bouzyges.run()
-            except ProfileMark:
-                pass
-        stats = pstats.Stats(prof)
-        stats.sort_stats(pstats.SortKey.TIME)
-        stats.dump_stats("stats.prof")
-    else:
-        bouzyges.run()
-    bouzyges.prompter.report_usage()
+    main()
