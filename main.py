@@ -93,12 +93,32 @@ OpenAIMessages = tuple[frozendict[OpenAIPromptRole, str]]
 T = TypeVar("T")
 
 
-# Parameters
-# TODO: use sys.argv for these
-PROFILING = True
-logging.basicConfig(level=logging.DEBUG)
-STOP_PROFILING_AFTER_SECONDS: int | None = None
-PROMPTER_OPTION: PrompterOption = "openai"
+## Parameters
+@dataclass
+class RunParameters:
+    """\
+Parameters for the run of the program.
+"""
+
+    profiling: bool = False
+    logging_level: int = logging.INFO
+    stop_profiling_after_seconds: int | None = None
+    prompter: PrompterOption = "openai"
+
+    def update(self, **kwargs):
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+        logging.basicConfig(level=self.logging_level)
+
+
+AVAILABLE_PROMPTERS: list[PrompterOption] = ["openai", "azure", "human"]
+PARAMS = RunParameters()
+PARAMS.update(
+    profiling=False,
+    logging_level=logging.INFO,
+    stop_profiling_after_seconds=None,
+    prompter="openai",
+)
 
 
 ## Logic constants
@@ -1613,9 +1633,9 @@ Wrapper for requests.get that prepends known url and
 raises an exception on non-200 responses.
 """
         # Check for the timeout
-        if PROFILING and STOP_PROFILING_AFTER_SECONDS is not None:
+        if PARAMS.profiling and PARAMS.stop_profiling_after_seconds is not None:
             elapsed = datetime.datetime.now() - self.__start_time
-            if elapsed.total_seconds() > STOP_PROFILING_AFTER_SECONDS:
+            if elapsed.total_seconds() > PARAMS.stop_profiling_after_seconds:
                 raise ProfileMark("Time limit exceeded")
 
         # Include the known url
@@ -2297,7 +2317,7 @@ otherwise.
         snowstorm = SnowstormAPI(URL(snowstorm_endpoint))
 
         prompter: Prompter
-        match PROMPTER_OPTION:
+        match PARAMS.prompter:
             case "openai":
                 prompter = OpenAIPrompter(prompt_format=OpenAIPromptFormat())
 
@@ -2379,7 +2399,7 @@ otherwise.
         """\
 Run the Bouzyges system.
 """
-        if PROFILING:
+        if PARAMS.profiling:
             with cProfile.Profile() as prof:
                 try:
                     self._run()
@@ -2404,8 +2424,8 @@ class BouzygesWindow(QtWidgets.QMainWindow):
         options_subtitle = QtWidgets.QLabel("Options")
         options_subtitle.setStyleSheet("font-weight: bold;")
         options_layout.addWidget(options_subtitle)
-        options_contents = QtWidgets.QHBoxLayout()
-        # TODO: Add options
+        options_contents = QtWidgets.QVBoxLayout()
+        self.__populate_option_contents(options_contents)
         options_layout.addLayout(options_contents)
 
         # Input file selection
@@ -2465,9 +2485,96 @@ class BouzygesWindow(QtWidgets.QMainWindow):
         if dir:
             self.output_dir.setText(dir)
 
-    def spin_bouzyges(self):
+    def spin_bouzyges(self) -> None:
         bouzyges = Bouzyges.prepare(terms=["Pyogenic abscess of liver"])
         bouzyges.run()
+
+    def __populate_option_contents(self, layout) -> None:
+        # Prompter choice:
+        prompter_layout = QtWidgets.QHBoxLayout()
+        prompter_label = QtWidgets.QLabel("Prompter:")
+        prompter_options = QtWidgets.QComboBox()
+        prompter_options.addItems(["OpenAI", "Azure OpenAI", "Human"])
+        current_prompter_idx = AVAILABLE_PROMPTERS.index(PARAMS.prompter)
+        prompter_options.setCurrentIndex(current_prompter_idx)
+        prompter_options.currentIndexChanged.connect(self.prompter_changed)
+        prompter_layout.addWidget(prompter_label)
+        prompter_layout.addWidget(prompter_options)
+
+        dev_label = QtWidgets.QLabel("Profiling and logging:")
+
+        dev_layout = QtWidgets.QHBoxLayout()
+        profiling_layout = QtWidgets.QVBoxLayout()
+        profiling_label = QtWidgets.QLabel("Generate stats.prof file:")
+        profiling_checkbox = QtWidgets.QCheckBox("Profiling")
+        profiling_checkbox.setChecked(PARAMS.profiling)
+        profiling_checkbox.stateChanged.connect(self.profiling_changed)
+        profiling_layout.addWidget(profiling_label)
+        profiling_layout.addWidget(profiling_checkbox)
+
+        early_termination_layout = QtWidgets.QVBoxLayout()
+        early_termination_label = QtWidgets.QLabel("Stop execution after:")
+        early_termination_input = QtWidgets.QLineEdit()
+        early_termination_input.setPlaceholderText("Seconds, 0 for no limit")
+        if PARAMS.stop_profiling_after_seconds is not None:
+            early_termination_input.setText(
+                str(PARAMS.stop_profiling_after_seconds)
+            )
+        early_termination_input.textChanged.connect(self.et_changed)
+        early_termination_layout.addWidget(early_termination_label)
+        early_termination_layout.addWidget(early_termination_input)
+
+        logging_level_layout = QtWidgets.QVBoxLayout()
+        logging_level_label = QtWidgets.QLabel("Logging level:")
+        logging_level_options = QtWidgets.QComboBox()
+        logging_level_options.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        current_logging_level_idx = [
+            logging.DEBUG,
+            logging.INFO,
+            logging.WARNING,
+            logging.ERROR,
+        ].index(PARAMS.logging_level)
+        logging_level_options.setCurrentIndex(current_logging_level_idx)
+        logging_level_options.currentIndexChanged.connect(self.ll_changed)
+        logging_level_layout.addWidget(logging_level_label)
+        logging_level_layout.addWidget(logging_level_options)
+
+        dev_layout.addLayout(profiling_layout)
+        dev_layout.addLayout(early_termination_layout)
+        dev_layout.addLayout(logging_level_layout)
+
+        layout.addLayout(prompter_layout)
+        layout.addWidget(dev_label)
+        layout.addLayout(dev_layout)
+
+    def prompter_changed(self, index) -> None:
+        new_prompter = AVAILABLE_PROMPTERS[index]
+        PARAMS.update(prompter=new_prompter)
+        logging.info(f"Prompter changed to: {new_prompter}")
+
+    def profiling_changed(self, state) -> None:
+        PARAMS.update(profiling=state == 2)
+        logging.info(f"Profiling changed to: {state == 2}")
+
+    def et_changed(self, text) -> None:
+        try:
+            new_et = int(text)
+        except ValueError:
+            PARAMS.update(stop_profiling_after_seconds=None)
+            logging.warning("Invalid input for early termination, resetting")
+            return
+
+        if new_et <= 0:
+            new_et = None
+
+        PARAMS.update(stop_profiling_after_seconds=None)
+        logging.info(f"Early termination changed to: {new_et}")
+
+    def ll_changed(self, index) -> None:
+        levels = [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR]
+        new_level = levels[index]
+        logging.info(f"Logging level changed to: {new_level}")
+        PARAMS.update(logging_level=new_level)
 
 
 def main():
