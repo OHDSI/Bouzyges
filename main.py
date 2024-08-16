@@ -6,6 +6,7 @@ import logging
 import openai
 import os
 import pstats
+from PyQt6 import QtCore
 from PyQt6 import QtWidgets
 import re
 import requests
@@ -98,13 +99,13 @@ LOGGER = logging.getLogger("Bouzyges")
 logging.basicConfig(level=logging.INFO)
 LOGGER.info("Logging started")
 # Default handler and formatter
-_handler = logging.StreamHandler(sys.stdout)
+_stdout_handler = logging.StreamHandler(sys.stdout)
 _formatter = logging.Formatter(
     "[%(asctime)s] %(levelname)s [%(name)s.%(funcName)s:%(lineno)d] "
     "%(message)s"
 )
-_handler.setFormatter(_formatter)
-LOGGER.addHandler(_handler)
+_stdout_handler.setFormatter(_formatter)
+LOGGER.addHandler(_stdout_handler)
 LOGGER.info("Logging configured")
 
 ## Parameters
@@ -129,6 +130,7 @@ Parameters for the run of the program.
     snowstorm_url: URL = URL("http://localhost:8080/")
     llm_model_id: str = DEFAULT_MODEL
     cache_db: str | None = "prompt_cache.db"
+    log_to_file: bool = True
 
     # Environment variables
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
@@ -2435,29 +2437,33 @@ Run the Bouzyges system.
 # https://stackoverflow.com/questions/28655198/best-way-to-display-logs-in-pyqt
 class BouzygesLoggingSpace(logging.Handler):
     """\
-A logging handler that outputs log records to a QPlainTextEdit.
+A logging handler that outputs log records to a QListView widget.
 """
 
     max_records = 2000
 
     def __init__(self, *args, **kwargs):
         super().__init__()
-        self.widget = QtWidgets.QPlainTextEdit(*args, **kwargs)
-        self.widget.setReadOnly(True)
-        self._content: list[str] = []
+        self.widget = QtWidgets.QListView(*args, **kwargs)
+        self.model = QtCore.QStringListModel()
+        self.widget.setModel(self.model)
 
         self.setFormatter(_formatter)
 
     def emit(self, record):
         msg = self.format(record)
-        self._content.append(msg)
-        if len(self._content) > self.max_records:
-            self._content.pop(0)
-        self.widget.setPlainText("\n".join(self._content))
-        # Scroll to the bottom
+        self.model.insertRow(0)
+        index = self.model.index(0)
+        self.model.setData(index, msg)
+        # Scroll to the top
         slider = self.widget.verticalScrollBar()
         if slider:
-            slider.setValue(slider.maximum())
+            slider.setValue(0)
+
+        # Limit the number of records
+        if self.model.rowCount() > self.max_records:
+            self.model.removeRow(self.max_records)
+
 
 
 class BouzygesWindow(QtWidgets.QMainWindow):
@@ -2472,7 +2478,16 @@ Main window and start config for the Bouzyges system.
         self.populate_layout(layout)
 
     def populate_layout(self, layout):
+        self._verticalSpacer = QtWidgets.QSpacerItem(
+            20,
+            40,
+            QtWidgets.QSizePolicy.Policy.Minimum,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+
         # Options
+        self.options_container = QtWidgets.QWidget()
+        self.options_container.setMaximumWidth(600)
         options_layout = QtWidgets.QVBoxLayout()
         options_subtitle = QtWidgets.QLabel("Options")
         options_subtitle.setStyleSheet("font-weight: bold;")
@@ -2480,7 +2495,35 @@ Main window and start config for the Bouzyges system.
         options_contents = QtWidgets.QVBoxLayout()
         self.__populate_option_contents(options_contents)
         options_layout.addLayout(options_contents)
+        self.options_container.setLayout(options_layout)
 
+        # Input and output
+        io_layout = QtWidgets.QVBoxLayout()
+        self.__populate_io_layout(io_layout)
+
+        # Logging space
+        logging_layout = QtWidgets.QVBoxLayout()
+        logging_subtitle = QtWidgets.QLabel("Logging")
+        logging_subtitle.setStyleSheet("font-weight: bold;")
+        self.log_display = BouzygesLoggingSpace()
+        LOGGER.addHandler(self.log_display)
+        LOGGER.info("Logging to GUI is initialized")
+        log_widget = self.log_display.widget
+        logging_layout.addWidget(logging_subtitle)
+        logging_layout.addWidget(log_widget)
+
+        top_half_layout = QtWidgets.QHBoxLayout()
+        top_half_layout.addWidget(self.options_container)
+        top_half_layout.addLayout(io_layout)
+
+        layout.addLayout(top_half_layout)
+        layout.addLayout(logging_layout)
+
+        widget = QtWidgets.QWidget()
+        widget.setLayout(layout)
+        self.setCentralWidget(widget)
+
+    def __populate_io_layout(self, layout) -> None:
         # Input file selection
         input_layout = QtWidgets.QVBoxLayout()
         input_subtitle = QtWidgets.QLabel("Input file")
@@ -2513,26 +2556,11 @@ Main window and start config for the Bouzyges system.
         run_button.clicked.connect(self.spin_bouzyges)
         run_layout.addWidget(run_button)
 
-        # Logging space
-        logging_layout = QtWidgets.QVBoxLayout()
-        logging_subtitle = QtWidgets.QLabel("Logging")
-        logging_subtitle.setStyleSheet("font-weight: bold;")
-        self.log_display = BouzygesLoggingSpace()
-        LOGGER.addHandler(self.log_display)
-        LOGGER.info("Logging to GUI is initialized")
-        log_widget = self.log_display.widget
-        logging_layout.addWidget(logging_subtitle)
-        logging_layout.addWidget(log_widget)
-
-        layout.addLayout(options_layout)
         layout.addLayout(input_layout)
+        layout.addItem(self._verticalSpacer)
         layout.addLayout(output_layout)
+        layout.addItem(self._verticalSpacer)
         layout.addLayout(run_layout)
-        layout.addLayout(logging_layout)
-
-        widget = QtWidgets.QWidget()
-        widget.setLayout(layout)
-        self.setCentralWidget(widget)
 
     def select_input(self):
         file = QtWidgets.QFileDialog.getOpenFileName(
@@ -2560,7 +2588,18 @@ Main window and start config for the Bouzyges system.
 
     def spin_bouzyges(self) -> None:
         bouzyges = Bouzyges.prepare(terms=["Pyogenic abscess of liver"])
-        # TODO: disable options widgets
+
+        # Adding a file handler to the logger
+        if PARAMS.log_to_file:
+            date_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            file_name = f"bouzyges-{date_str}.log"
+            log_file = os.path.join(self.output_dir.text(), file_name)
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setFormatter(_formatter)
+            LOGGER.addHandler(file_handler)
+
+        self.options_container.setEnabled(False)
+
         thread = threading.Thread(target=bouzyges.run)
         LOGGER.info("Starting Bouzyges thread")
         thread.start()
@@ -2576,6 +2615,7 @@ Main window and start config for the Bouzyges system.
         ## Prompter imlementations
         impl_layout = QtWidgets.QHBoxLayout()
         impl_label = QtWidgets.QLabel("Prompter:")
+        impl_label.setStyleSheet("font-weight: bold;")
         impl_options = QtWidgets.QComboBox()
         impl_options.addItems(AVAILABLE_PROMPTERS.values())
         current_impl_idx = list(AVAILABLE_PROMPTERS).index(PARAMS.prompter)
@@ -2616,17 +2656,17 @@ Main window and start config for the Bouzyges system.
 
         # Sqlite database options
         sqlite_layout = QtWidgets.QVBoxLayout()
-        sqlite_subtitle = QtWidgets.QLabel("Prompt cache path:")
+        sqlite_subtitle = QtWidgets.QLabel(
+            "Prompt cache path (set to empty to disable):"
+        )
         sqlite_subtitle.setStyleSheet("font-weight: bold;")
-        sqlite_hint = QtWidgets.QLabel("Set to empty to disable")
         sqlite_db_file = QtWidgets.QLineEdit()
-        sqlite_db_file.setPlaceholderText("prompt_cache.db")
+        sqlite_db_file.setPlaceholderText("None")
         sqlite_db_file.setText(PARAMS.cache_db)
         sqlite_db_file.textChanged.connect(self.cache_db_changed)
         sqlite_select = QtWidgets.QPushButton("Select")
         sqlite_select.clicked.connect(self.select_cache_db)
         sqlite_layout.addWidget(sqlite_subtitle)
-        sqlite_layout.addWidget(sqlite_hint)
         sqlite_selector_layout = QtWidgets.QHBoxLayout()
         sqlite_selector_layout.addWidget(sqlite_db_file)
         sqlite_selector_layout.addWidget(sqlite_select)
@@ -2667,7 +2707,15 @@ Main window and start config for the Bouzyges system.
         ].index(PARAMS.logging_level)
         logging_level_options.setCurrentIndex(current_logging_level_idx)
         logging_level_options.currentIndexChanged.connect(self.ll_changed)
+
+        log_to_file_checkbox = QtWidgets.QCheckBox("Log to file")
+        log_to_file_checkbox.setChecked(PARAMS.log_to_file)
+        log_to_file_checkbox.stateChanged.connect(
+            lambda state: PARAMS.update(log_to_file=state == 2)
+        )
+
         logging_level_layout.addWidget(logging_level_label)
+        logging_level_layout.addWidget(log_to_file_checkbox)
         logging_level_layout.addWidget(logging_level_options)
 
         dev_layout.addLayout(profiling_layout)
