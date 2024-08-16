@@ -1329,7 +1329,7 @@ Fully Defined concepts.
             answer = self.unwrap_bool_answer(cached_answer)
             LOGGER.info(
                 f"From cache: The term '{term}' is "
-                f"{'a subtype' if answer else 'not a subtype'}"
+                f"{'a subtype' if answer else 'not a subtype'} "
                 f"of '{prospective_supertype}'"
             )
             return answer
@@ -1337,7 +1337,7 @@ Fully Defined concepts.
         answer = self._prompt_bool_answer(prompt)
         LOGGER.info(
             f"From cache: The term '{term}' is "
-            f"{'a subtype' if answer else 'not a subtype'}"
+            f"{'a subtype' if answer else 'not a subtype'} "
             f"of '{prospective_supertype}'"
         )
         return answer
@@ -1671,6 +1671,11 @@ raises an exception on non-200 responses.
             raise BouzygesError(f"Could not connect to Snowstorm API: {e}")
 
         if not response.ok:
+            LOGGER.error(
+                f"Request failed: {response.status_code} {response.reason} "
+                f"for {response.url}"
+            )
+            LOGGER.error(f"Response: {json.dumps(response.json(), indent=2)}")
             raise SnowstormRequestError.from_response(response)
 
         return response
@@ -1720,7 +1725,10 @@ Get full concept information.
 """
         if sctid in self.__concepts_cache:
             return self.__concepts_cache[sctid]
-        response = self._get(f"browser/{self.branch_path}/concepts/{sctid}")
+        response = self._get(
+            url=f"browser/{self.branch_path}/concepts/{sctid}",
+            params={"activeFilter": True},
+        )
         concept = Concept.from_json(response.json())
         self.__concepts_cache[sctid] = concept
         return concept
@@ -1902,6 +1910,7 @@ Filter out children that are descendants of bad parents and return the rest.
             actual_children = self._get_collect(
                 url=f"{self.branch_path}/concepts/",
                 params={
+                    "activeFilter": True,
                     "ecl": expression,
                     "returnIdOnly": True,
                     "conceptIds": sorted(out),  # limit to known children
@@ -1951,6 +1960,7 @@ Get a concept's Proximal Primitive Parents
         )
 
         focus_concepts_string = response.json()["expression"].split(" : ")[0]
+        LOGGER.debug(f"PPP for {concept}: {focus_concepts_string}")
         concepts = map(SCTID, focus_concepts_string.split(" + "))
 
         out = set()
@@ -2447,23 +2457,30 @@ A logging handler that outputs log records to a QListView widget.
         self.widget = QtWidgets.QListView(*args, **kwargs)
         self.model = QtCore.QStringListModel()
         self.widget.setModel(self.model)
+        self.widget.setWordWrap(True)
+        self.widget.setAlternatingRowColors(True)
+        self.widget.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
 
         self.setFormatter(_formatter)
 
     def emit(self, record):
         msg = self.format(record)
-        self.model.insertRow(0)
-        index = self.model.index(0)
+
+        current_count = self.model.rowCount()
+        self.model.insertRow(current_count)
+        index = self.model.index(current_count)
         self.model.setData(index, msg)
+
         # Scroll to the top
         slider = self.widget.verticalScrollBar()
         if slider:
-            slider.setValue(0)
+            slider.setValue(slider.maximum())
 
         # Limit the number of records
         if self.model.rowCount() > self.max_records:
             self.model.removeRow(self.max_records)
-
 
 
 class BouzygesWindow(QtWidgets.QMainWindow):
@@ -2473,6 +2490,7 @@ Main window and start config for the Bouzyges system.
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._bouzyges_subthread: threading.Thread | None = None
         self.setWindowTitle("OHDSI Bouzyges")
         layout = QtWidgets.QVBoxLayout()
         self.populate_layout(layout)
@@ -2552,9 +2570,15 @@ Main window and start config for the Bouzyges system.
 
         # Run button
         run_layout = QtWidgets.QHBoxLayout()
-        run_button = QtWidgets.QPushButton("Run")
-        run_button.clicked.connect(self.spin_bouzyges)
-        run_layout.addWidget(run_button)
+        self.run_button = QtWidgets.QPushButton("Run")
+        self.run_button.clicked.connect(self.spin_bouzyges)
+        run_layout.addWidget(self.run_button)
+
+        # Stop button
+        self.stop_button = QtWidgets.QPushButton("Stop and quit")
+        self.stop_button.clicked.connect(self.stop_bouzyges)
+        self.stop_button.setEnabled(False)
+        run_layout.addWidget(self.stop_button)
 
         layout.addLayout(input_layout)
         layout.addItem(self._verticalSpacer)
@@ -2599,14 +2623,24 @@ Main window and start config for the Bouzyges system.
             LOGGER.addHandler(file_handler)
 
         self.options_container.setEnabled(False)
+        self.run_button.setEnabled(False)
+        self.stop_button.setEnabled(True)
 
-        thread = threading.Thread(target=bouzyges.run)
+        self._bouzyges_subthread = threading.Thread(target=bouzyges.run)
+        self._bouzyges_subthread.daemon = True
         LOGGER.info("Starting Bouzyges thread")
-        thread.start()
-        while thread.is_alive():
+        self._bouzyges_subthread.start()
+        while self._bouzyges_subthread.is_alive():
             QtWidgets.QApplication.processEvents()
         LOGGER.info("Bouzyges thread finished")
-        thread.join()
+        self._bouzyges_subthread.join()
+
+    def stop_bouzyges(self) -> None:
+        if self._bouzyges_subthread:
+            LOGGER.warning("Stopping Bouzyges thread")
+            sys.exit(1)
+        else:
+            LOGGER.error("No Bouzyges thread to stop")
 
     def __populate_option_contents(self, layout) -> None:
         # Prompter choice:
