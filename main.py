@@ -18,7 +18,7 @@ from typing import Callable, Iterable, Literal, Mapping, Self, TypeVar
 import openai
 import requests
 from frozendict import frozendict
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 # Optional imports
 ## dotenv
@@ -2518,6 +2518,7 @@ Main window and start config for the Bouzyges system.
         self._bouzyges_subthread: threading.Thread | None = None
         self.logger = LOGGER.getChild("GUI")
         self.setWindowTitle("OHDSI Bouzyges")
+        self.setWindowIcon(QtGui.QIcon("icon.png"))
         layout = QtWidgets.QVBoxLayout()
         self.populate_layout(layout)
 
