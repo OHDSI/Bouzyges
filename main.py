@@ -1,22 +1,24 @@
+from __future__ import annotations
+
 import cProfile
 import datetime
 import itertools
 import json
 import logging
-import openai
 import os
 import pstats
-from PyQt6 import QtCore
-from PyQt6 import QtWidgets
 import re
-import requests
 import sqlite3
 import sys
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from frozendict import frozendict
 from typing import Callable, Iterable, Literal, Mapping, Self, TypeVar
+
+import openai
+import requests
+from frozendict import frozendict
+from PyQt6 import QtCore, QtWidgets
 
 # Optional imports
 ## dotenv
@@ -1494,7 +1496,7 @@ A prompter that interfaces with the OpenAI API using.
         if success:
             self.logger.info("API is available")
             self.logger.debug(
-                f"Models: {json.dumps(response["data"], indent=2)}"
+                f"Models: {json.dumps(response['data'], indent=2)}"
             )
             if not any(self._model_id == obj["id"] for obj in response["data"]):
                 self.logger.warning(
@@ -2548,7 +2550,11 @@ Main window and start config for the Bouzyges system.
         logging_subtitle = QtWidgets.QLabel("Logging")
         logging_subtitle.setStyleSheet("font-weight: bold;")
         self.log_display = BouzygesLoggingSpace()
-        self.logger.addHandler(self.log_display)
+
+        LOGGER.addHandler(self.log_display)
+        for child in LOGGER.getChildren():
+            child.addHandler(self.log_display)
+
         self.logger.info("Logging to GUI is initialized")
         log_widget = self.log_display.widget
         logging_layout.addWidget(logging_subtitle)
@@ -2637,7 +2643,7 @@ Main window and start config for the Bouzyges system.
     def spin_bouzyges(self) -> None:
         bouzyges = Bouzyges.prepare(
             terms=["Pyogenic abscess of liver"],
-            logger=self.logger,
+            logger=LOGGER,
         )
 
         # Adding a file handler to the logger
@@ -2647,7 +2653,10 @@ Main window and start config for the Bouzyges system.
             log_file = os.path.join(self.output_dir.text(), file_name)
             file_handler = logging.FileHandler(log_file)
             file_handler.setFormatter(_formatter)
-            self.logger.addHandler(file_handler)
+
+            LOGGER.addHandler(file_handler)
+            for logger in LOGGER.getChildren():
+                logger.addHandler(file_handler)
 
         self.options_container.setEnabled(False)
         self.run_button.setEnabled(False)
