@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import cProfile
+import csv
 import datetime
 import itertools
 import json
 import logging
 import os
+import pandas as pd
 import pstats
 import re
 import sqlite3
@@ -113,38 +115,99 @@ LOGGER.addHandler(_stdout_handler)
 LOGGER.info("Logging configured")
 
 ## Parameters
+# Load environment variables for API access
+if dotenv is not None:
+    LOGGER.info("Loading environment variables from .env")
+    if os.path.exists(".env"):
+        dotenv.load_dotenv()
+    else:
+        LOGGER.warning("No .env file found")
+
 DEFAULT_MODEL = "gpt-4o-mini"
 AVAILABLE_PROMPTERS: dict[PrompterOption, str] = {
     "openai": "OpenAI",
     "azure": "Azure OpenAI",
     "human": "Human",
 }
+SEPARATORS: list[str] = [",", ";", "Tab"]
+QUOTECHARS: list[str] = ['"', "'"]
+QUOTING_POLICY: dict[str, int] = {
+    "Quote minimal": csv.QUOTE_MINIMAL,
+    "Quote all": csv.QUOTE_ALL,
+    "Quote string": csv.QUOTE_NONNUMERIC,
+    "No quoting": csv.QUOTE_NONE,
+}
 
 
 @dataclass
+class ProfilingParameters:
+    """\
+Parameters to control profiling of the program.
+"""
+
+    enabled: bool = True
+    stop_profiling_after_seconds: int | None = None
+
+
+@dataclass
+class LoggingParameters:
+    """\
+Parameters to control logging.
+"""
+
+    log_to_file: bool = True
+    logging_level: int = logging.INFO
+
+    def update(self, level):
+        self.logging_level = level
+        LOGGER.setLevel(level=self.logging_level)
+
+
+@dataclass
+class APIParameters:
+    """\
+Parameters to control the interface to Snowstorm, cache and LLMs.
+"""
+
+    prompter: PrompterOption = "openai"
+    snowstorm_url: URL = URL("http://localhost:8080/")
+    llm_model_id: str = DEFAULT_MODEL
+    cache_db: str | None = "prompt_cache.db"
+
+
+@dataclass
+class EnvironmentParameters:
+    """\
+Parameters that reflect the environment variables.
+"""
+
+    openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
+    azure_api_key: str | None = os.getenv("AZURE_OPENAI_API_KEY")
+    azure_api_endpoint: str | None = os.getenv("AZURE_OPENAI_ENDPOINT")
+
+
+@dataclass
+class InputParameters:
+    """\
+Parameters for reading input data.
+"""
+
+    file: str | None = None
+    sep: str = "Tab"
+    quotechar: str = '"'
+    quoting: int = csv.QUOTE_MINIMAL
+
+
 class RunParameters:
     """\
 Parameters for the run of the program.
 """
 
-    profiling: bool = False
-    logging_level: int = logging.INFO
-    stop_profiling_after_seconds: int | None = None
-    prompter: PrompterOption = "openai"
-    snowstorm_url: URL = URL("http://localhost:8080/")
-    llm_model_id: str = DEFAULT_MODEL
-    cache_db: str | None = "prompt_cache.db"
-    log_to_file: bool = True
-
-    # Environment variables
-    openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
-    azure_api_key: str | None = os.getenv("AZURE_OPENAI_API_KEY")
-    azure_api_endpoint: str | None = os.getenv("AZURE_OPENAI_ENDPOINT")
-
-    def update(self, **kwargs):
-        for key, value in kwargs.items():
-            setattr(self, key, value)
-        LOGGER.setLevel(level=self.logging_level)
+    api: APIParameters = APIParameters()
+    env: EnvironmentParameters = EnvironmentParameters()
+    log: LoggingParameters = LoggingParameters()
+    prof: ProfilingParameters = ProfilingParameters()
+    read: InputParameters = InputParameters()
 
 
 PARAMS = RunParameters()
@@ -308,7 +371,7 @@ more useful information for domain modelling, but it is not yet well explored.
     @classmethod
     def from_json(cls, json_data: dict):
         af = json_data["additionalFields"]
-        pd = af.get("parentDomain")
+        dom = af.get("parentDomain")
         prf = af.get("proximalPrimitiveRefinement")
 
         return cls(
@@ -320,7 +383,7 @@ more useful information for domain modelling, but it is not yet well explored.
             ),
             domain_constraint=ECLExpression(af["domainConstraint"]),
             guide_link=URL(af["guideURL"]),
-            parent_domain=ECLExpression(pd) if pd else None,
+            parent_domain=ECLExpression(dom) if dom else None,
             proximal_primitive_refinement=ECLExpression(prf) if prf else None,
         )
 
@@ -419,7 +482,7 @@ class SemanticPortrait:
     """\
 Represents an interactively built semantic portrait of a source concept."""
 
-    def __init__(self, term: str, context: str | None = None) -> None:
+    def __init__(self, term: str, context: Iterable[str] | None = None) -> None:
         self.source_term: str = term
         self.context: Iterable[str] | None = context
         self.ancestor_anchors: set[SCTID] = set()
@@ -1130,8 +1193,8 @@ Interfaces prompts to the LLM agent and parses answers.
         self.prompt_format = prompt_format
         self.cache: PromptCache | None = None
         self.logger = LOGGER.getChild(self.__class__.__name__)
-        if PARAMS.cache_db is not None:
-            conn = sqlite3.connect(PARAMS.cache_db, check_same_thread=False)
+        if PARAMS.api.cache_db is not None:
+            conn = sqlite3.connect(PARAMS.api.cache_db, check_same_thread=False)
             self.cache = PromptCache(conn)
 
     @staticmethod
@@ -1680,9 +1743,10 @@ Wrapper for requests.get that prepends known url and
 raises an exception on non-200 responses.
 """
         # Check for the timeout
-        if PARAMS.profiling and PARAMS.stop_profiling_after_seconds is not None:
+        if PARAMS.prof.stop_profiling_after_seconds:
             elapsed = datetime.datetime.now() - self.__start_time
-            if elapsed.total_seconds() > PARAMS.stop_profiling_after_seconds:
+            seconds = elapsed.total_seconds()
+            if seconds > PARAMS.prof.stop_profiling_after_seconds:
                 raise ProfileMark("Time limit exceeded")
 
         # Include the known url
@@ -2075,6 +2139,67 @@ manually/with LLM.
         return True
 
 
+class FileReader:
+    """\
+A class to read and parse files.
+"""
+
+    input_doctext = """\
+Input file must be a CSV file with at least the following columns:
+<ul>
+    <li><pre>vocab</pre>: the vocabulary or code-system of the source term</li>
+    <li><pre>code</pre>: the unique code for a source term</li>
+    <li><pre>term</pre>: the term to be analyzed</li>
+</ul>
+The rest of the columns are optional; any encountered value will be used as a
+context for the term.
+"""
+
+    def __init__(self, path: str) -> None:
+        self.logger = LOGGER.getChild(self.__class__.__name__)
+        self.path = path
+        self.content: pd.DataFrame | None = None
+
+    def read(self) -> None:
+        """\
+Read the file
+"""
+        decode_sep = {
+            "Tab": "\t",
+        }
+        encoded_sep = PARAMS.read.sep
+        df = pd.read_csv(
+            self.path,
+            sep=decode_sep.get(encoded_sep, encoded_sep),
+            quotechar=PARAMS.read.quotechar,
+        )
+        self.logger.info(f"Read {len(df)} rows from {self.path}")
+        self.content = df
+
+    def parse(self) -> list[SemanticPortrait]:
+        """\
+Parse the file into a list of SemanticPortrait objects
+"""
+        if self.content is None:
+            raise BouzygesError("No content to parse")
+
+        return list(self.content.apply(self.__portrait_from_row, axis=1))
+
+    def __portrait_from_row(self, row: pd.Series) -> SemanticPortrait:
+        # TODO: Save vocab and code for later use
+        _ = row["vocab"], row["code"]
+        term = row["term"]
+        context = [
+            str(v)
+            for k, v in row.to_dict().items()
+            if k not in ["vocab", "code", "term"]
+        ]
+        return SemanticPortrait(
+            term,
+            context,
+        )
+
+
 # Main logic host
 class Bouzyges:
     """\
@@ -2085,19 +2210,11 @@ Main logic host for the Bouzyges system.
         self,
         snowstorm: SnowstormAPI,
         prompter: Prompter,
-        terms: Iterable[str],
-        contexts: Iterable[str] | None = None,
+        portraits: Iterable[SemanticPortrait],
     ):
         self.snowstorm = snowstorm
         self.prompter = prompter
-        self.portraits = {}
-        if contexts is None:
-            self.portraits = {term: SemanticPortrait(term) for term in terms}
-        else:
-            self.portraits = {
-                term: SemanticPortrait(term, context)
-                for term, context in zip(terms, contexts)
-            }
+        self.portraits = {p.source_term: p for p in portraits}
 
         self.logger = LOGGER.getChild(self.__class__.__name__)
 
@@ -2121,18 +2238,20 @@ Main logic host for the Bouzyges system.
             self.logger.info("    - " + entry.guide_link)
 
     @classmethod
-    def prepare(cls, terms: Iterable[str], logger: logging.Logger) -> Self:
+    def prepare(cls, logger: logging.Logger) -> Self:
         logger = logger.getChild(cls.__name__)
 
-        # Load environment variables for API access
-        if dotenv is not None:
-            logger.info("Loading environment variables from .env")
-            if os.path.exists(".env"):
-                dotenv.load_dotenv()
-            else:
-                logger.warning("No .env file found")
+        # Read file for portraits
+        if not PARAMS.read.file:
+            raise BouzygesError("No input file specified!")
+        logger.info("Reading input file...")
+        reader = FileReader(PARAMS.read.file)
+        reader.read()
+        if reader.content is None:
+            raise BouzygesError("Could not read the input file")
+        portraits = reader.parse()
 
-        snowstorm_endpoint = PARAMS.snowstorm_url
+        snowstorm_endpoint = PARAMS.api.snowstorm_url
         try:
             snowstorm = SnowstormAPI(snowstorm_endpoint)
         except SnowstormAPIError as e:
@@ -2140,19 +2259,19 @@ Main logic host for the Bouzyges system.
             raise BouzygesError("Could not connect to Snowstorm API")
 
         prompter: Prompter
-        match PARAMS.prompter:
+        match PARAMS.api.prompter:
             case "openai":
                 prompter = OpenAIPrompter(
                     prompt_format=OpenAIPromptFormat(),
-                    model=PARAMS.llm_model_id,
+                    model=PARAMS.api.llm_model_id,
                 )
 
             case "azure":
                 prompter = OpenAIAzurePrompter(
                     prompt_format=OpenAIPromptFormat(),
-                    api_key=PARAMS.azure_api_key,
-                    azure_endpoint=PARAMS.azure_api_endpoint,
-                    model=PARAMS.llm_model_id,
+                    api_key=PARAMS.env.azure_api_key,
+                    azure_endpoint=PARAMS.env.azure_api_endpoint,
+                    model=PARAMS.api.llm_model_id,
                 )
             case "human":
                 prompter = HumanPrompter(
@@ -2169,7 +2288,7 @@ Main logic host for the Bouzyges system.
         bouzyges = cls(
             snowstorm=snowstorm,
             prompter=prompter,
-            terms=terms,
+            portraits=portraits,
         )
         return bouzyges
 
@@ -2207,7 +2326,7 @@ Main logic host for the Bouzyges system.
         """\
 Run the Bouzyges system.
 """
-        if PARAMS.profiling:
+        if PARAMS.prof:
             with cProfile.Profile() as prof:
                 try:
                     self._run()
@@ -2633,11 +2752,33 @@ Main window and start config for the Bouzyges system.
         input_layout.addWidget(input_subtitle)
         input_contents = QtWidgets.QHBoxLayout()
         self.input_file = QtWidgets.QLineEdit()
+        self.input_file.setPlaceholderText("Select input CSV file")
+        self.input_file.setReadOnly(True)
         input_contents.addWidget(self.input_file)
         input_select = QtWidgets.QPushButton("Select")
         input_select.clicked.connect(self.select_input)
         input_contents.addWidget(input_select)
+        input_options = QtWidgets.QHBoxLayout()
+        sep = QtWidgets.QLabel("Separator:")
+        input_options.addWidget(sep)
+        separator = QtWidgets.QComboBox()
+        separator.addItems(SEPARATORS)
+        separator.currentIndexChanged.connect(self.separator_changed)
+        input_options.addWidget(separator)
+        quoting_policy = QtWidgets.QComboBox()
+        quoting_policy.addItems(QUOTING_POLICY)
+        quoting_policy.currentIndexChanged.connect(self.quoting_policy_changed)
+        input_options.addWidget(quoting_policy)
+        qchar_label = QtWidgets.QLabel("Quote character:")
+        input_options.addWidget(qchar_label)
+        quote_char = QtWidgets.QLineEdit()
+        quote_char.setPlaceholderText("Quote character")
+        quote_char.setText('"')
+        quote_char.setMaximumWidth(30)
+        quote_char.textChanged.connect(self.quote_char_changed)
+        input_options.addWidget(quote_char)
         input_layout.addLayout(input_contents)
+        input_layout.addLayout(input_options)
 
         # Output directory selection
         output_layout = QtWidgets.QVBoxLayout()
@@ -2677,6 +2818,8 @@ Main window and start config for the Bouzyges system.
         )
         if file:
             self.input_file.setText(file[0])
+            PARAMS.read.file = file[0]
+            self.logger.debug(f"Input file set to: {file[0]}")
 
     def select_output(self):
         dir = QtWidgets.QFileDialog.getExistingDirectory(
@@ -2692,11 +2835,11 @@ Main window and start config for the Bouzyges system.
             "Select cache database file",
         )
         if file:
-            self.input_file.setText(file[0])
+            PARAMS.api.cache_db = file[0]
 
     def spin_bouzyges(self) -> None:
         # Adding a file handler to the logger
-        if PARAMS.log_to_file:
+        if PARAMS.log.log_to_file:
             date_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
             file_name = f"bouzyges-{date_str}.log"
             log_file = os.path.join(self.output_dir.text(), file_name)
@@ -2709,7 +2852,6 @@ Main window and start config for the Bouzyges system.
 
         def get_bouzyges():
             bouzyges_capture["success"] = Bouzyges.prepare(
-                terms=TERMS,
                 logger=LOGGER,
             )
 
@@ -2739,6 +2881,18 @@ Main window and start config for the Bouzyges system.
         self._bouzyges_subthread.join()
         self._bouzyges_subthread = None
 
+    def separator_changed(self, index) -> None:
+        PARAMS.read.sep = SEPARATORS[index]
+        self.logger.debug(f"Separator changed to: {SEPARATORS[index]}")
+
+    def quoting_policy_changed(self, index) -> None:
+        PARAMS.read.quoting = QUOTING_POLICY[index]
+        self.logger.debug(f"Quoting policy changed to: {QUOTING_POLICY[index]}")
+
+    def quote_char_changed(self, text) -> None:
+        PARAMS.read.quotechar = text
+        self.logger.debug(f"Quote character changed to: {text}")
+
     def stop_bouzyges(self) -> None:
         if self._bouzyges_subthread:
             self.logger.warning("Stopping Bouzyges thread")
@@ -2756,7 +2910,7 @@ Main window and start config for the Bouzyges system.
         impl_label.setStyleSheet("font-weight: bold;")
         impl_options = QtWidgets.QComboBox()
         impl_options.addItems(AVAILABLE_PROMPTERS.values())
-        current_impl_idx = list(AVAILABLE_PROMPTERS).index(PARAMS.prompter)
+        current_impl_idx = list(AVAILABLE_PROMPTERS).index(PARAMS.api.prompter)
         impl_options.setCurrentIndex(current_impl_idx)
         impl_options.currentIndexChanged.connect(self.prompter_changed)
         impl_layout.addWidget(impl_label)
@@ -2767,7 +2921,7 @@ Main window and start config for the Bouzyges system.
         model_label = QtWidgets.QLabel("Model ID:")
         model_input = QtWidgets.QLineEdit()
         model_input.setPlaceholderText(DEFAULT_MODEL)
-        model_input.setText(PARAMS.llm_model_id)
+        model_input.setText(PARAMS.api.llm_model_id)
         model_input.textChanged.connect(self.model_id_changed)
         model_layout.addWidget(model_label)
         model_layout.addWidget(model_input)
@@ -2785,7 +2939,7 @@ Main window and start config for the Bouzyges system.
         snowstorm_url_label = QtWidgets.QLabel("Endpoint URL:")
         snowstorm_url_input = QtWidgets.QLineEdit()
         snowstorm_url_input.setPlaceholderText("http://localhost:8080/")
-        snowstorm_url_input.setText(PARAMS.snowstorm_url)
+        snowstorm_url_input.setText(PARAMS.api.snowstorm_url)
         snowstorm_url_input.textChanged.connect(self.snowstorm_url_changed)
         snowstorm_url_layout.addWidget(snowstorm_url_label)
         snowstorm_url_layout.addWidget(snowstorm_url_input)
@@ -2800,7 +2954,7 @@ Main window and start config for the Bouzyges system.
         sqlite_subtitle.setStyleSheet("font-weight: bold;")
         sqlite_db_file = QtWidgets.QLineEdit()
         sqlite_db_file.setPlaceholderText("None")
-        sqlite_db_file.setText(PARAMS.cache_db)
+        sqlite_db_file.setText(PARAMS.api.cache_db)
         sqlite_db_file.textChanged.connect(self.cache_db_changed)
         sqlite_select = QtWidgets.QPushButton("Select")
         sqlite_select.clicked.connect(self.select_cache_db)
@@ -2817,7 +2971,7 @@ Main window and start config for the Bouzyges system.
 
         profiling_layout = QtWidgets.QVBoxLayout()
         profiling_checkbox = QtWidgets.QCheckBox("Generate stats.prof")
-        profiling_checkbox.setChecked(PARAMS.profiling)
+        profiling_checkbox.setChecked(PARAMS.prof.enabled)
         profiling_checkbox.stateChanged.connect(self.profiling_changed)
         profiling_layout.addWidget(profiling_checkbox)
 
@@ -2825,9 +2979,9 @@ Main window and start config for the Bouzyges system.
         early_termination_label = QtWidgets.QLabel("Stop execution after:")
         early_termination_input = QtWidgets.QLineEdit()
         early_termination_input.setPlaceholderText("Do not stop")
-        if PARAMS.stop_profiling_after_seconds is not None:
+        if PARAMS.prof.stop_profiling_after_seconds is not None:
             early_termination_input.setText(
-                str(PARAMS.stop_profiling_after_seconds)
+                str(PARAMS.prof.stop_profiling_after_seconds)
             )
         early_termination_input.textChanged.connect(self.et_changed)
         early_termination_layout.addWidget(early_termination_label)
@@ -2842,15 +2996,13 @@ Main window and start config for the Bouzyges system.
             logging.INFO,
             logging.WARNING,
             logging.ERROR,
-        ].index(PARAMS.logging_level)
+        ].index(PARAMS.log.logging_level)
         logging_level_options.setCurrentIndex(current_logging_level_idx)
         logging_level_options.currentIndexChanged.connect(self.ll_changed)
 
         log_to_file_checkbox = QtWidgets.QCheckBox("Log to file")
-        log_to_file_checkbox.setChecked(PARAMS.log_to_file)
-        log_to_file_checkbox.stateChanged.connect(
-            lambda state: PARAMS.update(log_to_file=state == 2)
-        )
+        log_to_file_checkbox.setChecked(PARAMS.log.log_to_file)
+        log_to_file_checkbox.stateChanged.connect(self.ltf_changed)
 
         logging_level_layout.addWidget(logging_level_label)
         logging_level_layout.addWidget(log_to_file_checkbox)
@@ -2866,54 +3018,56 @@ Main window and start config for the Bouzyges system.
         layout.addWidget(dev_label)
         layout.addLayout(dev_layout)
 
+    def ltf_changed(self, state) -> None:
+        PARAMS.log.log_to_file = state == 2
+        self.logger.debug(f"Logging to file changed to: {state == 2}")
+
     def prompter_changed(self, index) -> None:
-        new_prompter = AVAILABLE_PROMPTERS[list(AVAILABLE_PROMPTERS)[index]]
-        PARAMS.update(prompter=new_prompter)
+        new_prompter = list(AVAILABLE_PROMPTERS)[index]
+        PARAMS.api.prompter = new_prompter
         self.logger.debug(f"Prompter changed to: {new_prompter}")
 
     def profiling_changed(self, state) -> None:
-        PARAMS.update(profiling=state == 2)
+        PARAMS.prof.enabled = state == 2
         self.logger.debug(f"Profiling changed to: {state == 2}")
 
     def et_changed(self, text) -> None:
         try:
             new_et = int(text)
         except ValueError:
-            PARAMS.update(stop_profiling_after_seconds=None)
-            self.logger.warning(
-                "Invalid input for early termination, resetting"
-            )
+            PARAMS.prof.stop_profiling_after_seconds = None
+            self.logger.debug("Invalid input for early termination, resetting")
             return
 
         if new_et <= 0:
             new_et = None
 
-        PARAMS.update(stop_profiling_after_seconds=None)
+        PARAMS.prof.stop_profiling_after_seconds = new_et
         self.logger.debug(f"Early termination changed to: {new_et}")
 
     def ll_changed(self, index) -> None:
         levels = [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR]
         new_level = levels[index]
         self.logger.debug(f"Logging level changed to: {new_level}")
-        PARAMS.update(logging_level=new_level)
+        PARAMS.log.update(new_level)
 
     def snowstorm_url_changed(self, text) -> None:
         if not text:
             text = "http://localhost:8080/"
-        PARAMS.update(snowstorm_url=text)
+        PARAMS.api.snowstorm_url = URL(text)
         self.logger.debug(f"Snowstorm URL changed to: {text}")
 
     def model_id_changed(self, text) -> None:
         if not text:
             text = DEFAULT_MODEL
 
-        PARAMS.update(llm_model_id=text)
+        PARAMS.api.llm_model_id = text
         self.logger.debug(f"LLM model_id set to: {text}")
 
     def cache_db_changed(self, text) -> None:
         if not text:
             text = None
-        PARAMS.update(cache_db=text)
+        PARAMS.api.cache_db = text
         self.logger.debug(f"Cache database path changed to: {text}")
 
 
