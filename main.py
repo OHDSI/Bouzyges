@@ -2553,8 +2553,6 @@ Main window and start config for the Bouzyges system.
         self.log_display = BouzygesLoggingSpace()
 
         LOGGER.addHandler(self.log_display)
-        for child in LOGGER.getChildren():
-            child.addHandler(self.log_display)
 
         self.logger.info("Logging to GUI is initialized")
         log_widget = self.log_display.widget
@@ -2642,11 +2640,6 @@ Main window and start config for the Bouzyges system.
             self.input_file.setText(file[0])
 
     def spin_bouzyges(self) -> None:
-        bouzyges = Bouzyges.prepare(
-            terms=["Pyogenic abscess of liver"],
-            logger=LOGGER,
-        )
-
         # Adding a file handler to the logger
         if PARAMS.log_to_file:
             date_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -2656,21 +2649,40 @@ Main window and start config for the Bouzyges system.
             file_handler.setFormatter(_formatter)
 
             LOGGER.addHandler(file_handler)
-            for logger in LOGGER.getChildren():
-                logger.addHandler(file_handler)
+
+        bouzyges_capture: dict[str, Bouzyges] = {}
+
+        def get_bouzyges():
+            bouzyges_capture["success"] = Bouzyges.prepare(
+                terms=["Pyogenic abscess of liver"],
+                logger=LOGGER,
+            )
+
+        self.__start_subthread("Bouzyges Preparation", get_bouzyges)
+        bouzyges = bouzyges_capture["success"]
 
         self.options_container.setEnabled(False)
         self.run_button.setEnabled(False)
         self.stop_button.setEnabled(True)
 
-        self._bouzyges_subthread = threading.Thread(target=bouzyges.run)
+        self.__start_subthread("Bouzyges Run", bouzyges.run)
+
+    def __start_subthread(self, name: str, target: Callable, *args, **kwargs):
+        if self._bouzyges_subthread:
+            self.logger.error("A Bouzyges thread is already running")
+            raise RuntimeError("A Bouzyges thread is already running")
+
+        self._bouzyges_subthread = threading.Thread(
+            *args, target=target, **kwargs
+        )
         self._bouzyges_subthread.daemon = True
-        self.logger.info("Starting Bouzyges thread")
+        self.logger.info(f"Starting {name} thread")
         self._bouzyges_subthread.start()
         while self._bouzyges_subthread.is_alive():
             QtWidgets.QApplication.processEvents()
-        self.logger.info("Bouzyges thread finished")
+        self.logger.info(f"{name} thread finished")
         self._bouzyges_subthread.join()
+        self._bouzyges_subthread = None
 
     def stop_bouzyges(self) -> None:
         if self._bouzyges_subthread:
