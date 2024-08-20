@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import cProfile
 import concurrent.futures
+import cProfile
 import datetime
 import itertools
 import json
@@ -12,13 +12,13 @@ import re
 import sqlite3
 import sys
 import threading
-import tenacity
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Iterable, Literal, Mapping, Self, TypeVar
 
 import openai
 import requests
+import tenacity
 from frozendict import frozendict
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -2560,7 +2560,7 @@ A logging handler that outputs log records to a QListView widget.
 
         # Limit the number of records
         if self.model.rowCount() > self.max_records:
-            self.model.removeRow(self.max_records)
+            self.model.removeRow(0)
 
 
 class BouzygesWindow(QtWidgets.QMainWindow):
@@ -2574,15 +2574,19 @@ Main window and start config for the Bouzyges system.
         self.logger = LOGGER.getChild("GUI")
         self.setWindowTitle("OHDSI Bouzyges")
         self.setWindowIcon(QtGui.QIcon("icon.png"))
+
         layout = QtWidgets.QVBoxLayout()
         self.populate_layout(layout)
+        widget = QtWidgets.QWidget()
+        widget.setLayout(layout)
+        self.setCentralWidget(widget)
 
     def populate_layout(self, layout):
         self._verticalSpacer = QtWidgets.QSpacerItem(
             20,
             40,
-            QtWidgets.QSizePolicy.Policy.Minimum,
             QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Minimum,
         )
 
         # Options
@@ -2620,10 +2624,6 @@ Main window and start config for the Bouzyges system.
 
         layout.addLayout(top_half_layout)
         layout.addLayout(logging_layout)
-
-        widget = QtWidgets.QWidget()
-        widget.setLayout(layout)
-        self.setCentralWidget(widget)
 
     def __populate_io_layout(self, layout) -> None:
         # Input file selection
