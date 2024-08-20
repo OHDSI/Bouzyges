@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import cProfile
+import concurrent.futures
 import datetime
 import itertools
 import json
@@ -169,10 +170,7 @@ IS_A = SCTID(116680003)
 ROOT_CONCEPT = SCTID(138875005)
 
 ### Temporary substitute for reading from a file
-# TERMS = ["Pyogenic abscess of liver", "Invasive lobular carcinoma of breast"]
-TERMS = [
-    "Pyogenic abscess of liver",
-]
+TERMS = ["Pyogenic abscess of liver", "Invasive lobular carcinoma of breast"]
 
 
 ## Dataclasses
@@ -2122,250 +2120,6 @@ Main logic host for the Bouzyges system.
             self.logger.info("    - " + entry.domain_constraint)
             self.logger.info("    - " + entry.guide_link)
 
-        # Initialize supertypes
-        self.initialize_supertypes()
-
-    def initialize_supertypes(self):
-        """\
-Initialize supertypes for all terms to start building portraits.
-"""
-        for source_term, portrait in self.portraits.items():
-            if portrait.ancestor_anchors:
-                raise BouzygesError(
-                    "Should not happen: ancestor anchors are set, "
-                    "and yet initialize_supertypes is called"
-                )
-
-            supertypes_decode = {
-                entry.term: entry.sctid for entry in self.mrcm_entries
-            }
-            supertype_term = self.prompter.prompt_supertype(
-                term=portrait.source_term,
-                options=supertypes_decode,
-                allow_escape=False,
-                term_context="; ".join(portrait.context)
-                if portrait.context
-                else None,
-            )
-            match supertype_term:
-                case SCTDescription(answer_term):
-                    supertype = supertypes_decode[answer_term]
-                    self.logger.info(f"Assuming {source_term} is {answer_term}")
-                    portrait.ancestor_anchors.add(supertype)
-                case _:
-                    raise BouzygesError(
-                        "Should not happen: null-like response from prompter; "
-                        "did the Prompter inject the escape hatch?"
-                    )
-
-    def populate_attribute_candidates(self) -> None:
-        for term, portrait in self.portraits.items():
-            attributes = self.snowstorm.get_attribute_suggestions(
-                portrait.ancestor_anchors
-            )
-
-            # Remove previously rejected attributes
-            for attribute in portrait.rejected_attributes:
-                attributes.pop(attribute, None)
-
-            self.logger.debug("Possible attributes for: " + term)
-            for sctid, attribute in attributes.items():
-                self.logger.debug(f" - {sctid} {attribute.pt}")
-
-            # Confirm the attributes
-            for attribute in attributes.values():
-                accept = self.prompter.prompt_attr_presence(
-                    term=portrait.source_term,
-                    attribute=attribute.pt,
-                    term_context="; ".join(portrait.context)
-                    if portrait.context
-                    else None,
-                )
-                self.logger.info(
-                    f"{attribute.sctid} {attribute.pt}: " + "Present"
-                    if accept
-                    else "Not present"
-                )
-
-                if accept:
-                    portrait.unchecked_attributes.add(attribute.sctid)
-
-            # Remember the constraints
-            for sctid, attribute in attributes.items():
-                if sctid not in portrait.unchecked_attributes:
-                    continue
-                portrait.relevant_constraints[sctid] = attribute
-
-    def populate_unchecked_attributes(self) -> None:
-        for portrait in self.portraits.values():
-            rejected = set()
-            for attribute in portrait.unchecked_attributes:
-                self.logger.debug(f"Attribute: {attribute}")
-                # Get possible attribute values
-                values_options = self.snowstorm.get_attribute_values(
-                    portrait, attribute
-                )
-                self.logger.debug(f"Values: {values_options}")
-
-                if not values_options:
-                    # No valid values for this attribute and parent combination
-                    rejected.add(attribute)
-                    continue
-                else:
-                    self.logger.info(f"Possible values for: {attribute}")
-                    for value in values_options:
-                        self.logger.info(f" - {value}")
-
-                # Prompt for the value
-                value_term = self.prompter.prompt_attr_value(
-                    term=portrait.source_term,
-                    attribute=portrait.relevant_constraints[attribute].pt,
-                    options=values_options.values(),
-                    term_context="; ".join(portrait.context)
-                    if portrait.context
-                    else None,
-                    allow_escape=True,
-                )
-
-                match value_term:
-                    case SCTDescription(answer_term):
-                        sctid = next(
-                            SCTID(sctid)
-                            for sctid, term in values_options.items()
-                            if term == answer_term
-                        )
-                        portrait.attributes[attribute] = sctid
-                    case EscapeHatch.WORD:
-                        # Choosing no attribute on initial prompt
-                        # means rejection
-                        rejected.add(attribute)
-
-            portrait.rejected_attributes |= rejected
-            # All are seen by now
-            portrait.unchecked_attributes = set()
-
-    def update_existing_attr_values(self) -> None:
-        """\
-Update existing attribute values with the most precise descendant for all terms.
-"""
-        for source_term, portrait in self.portraits.items():
-            new_attributes = {}
-            for attribute, value in portrait.attributes.items():
-                new_attributes[attribute] = value
-                while True:
-                    # Get children of the current value
-                    children = self.snowstorm.get_concept_children(
-                        new_attributes[attribute]
-                    )
-                    if not children:
-                        # Leaf node
-                        break
-
-                    descriptions = {v: k for k, v in children.items()}
-
-                    # Prompt for the most precise value
-                    value_term = self.prompter.prompt_attr_value(
-                        term=source_term,
-                        attribute=portrait.relevant_constraints[attribute].pt,
-                        options=descriptions,
-                        term_context="; ".join(portrait.context)
-                        if portrait.context
-                        else None,
-                        allow_escape=True,
-                    )
-
-                    if isinstance(value_term, EscapeHatch):
-                        # None of the children are correct
-                        break
-
-                    new_attributes[attribute] = descriptions[value_term]
-
-            portrait.attributes.update(new_attributes)
-
-    def update_anchors(self, source_term: str) -> bool:
-        portrait = self.portraits[source_term]
-        i = 0
-        ancestors_changed = True
-        while ancestors_changed:
-            ancestors_changed = self.__update_anchor(portrait)
-            i += ancestors_changed
-        self.logger.info(f"Updated {source_term} anchors in {i} iterations.")
-        return i > 1
-
-    def __update_anchor(
-        self,
-        portrait: SemanticPortrait,
-    ) -> bool:
-        """\
-Update the ancestor anchors for one term to more precise children. Performs a
-single iteration. Return True if the parent anchors have changed, False
-otherwise.
-"""
-        new_anchors = set()
-        for anchor in portrait.ancestor_anchors:
-            # Get all immediate descendants
-            children = self.snowstorm.get_concept_children(anchor)
-            self.logger.debug(f"Filtering {len(children)} children of {anchor}")
-
-            # Remove verbatim known ancestors
-            for known_ancestor in portrait.ancestor_anchors:
-                children.pop(known_ancestor, None)
-
-            # Filter previously rejected ancestors including meta-ancestors
-            remaining = self.snowstorm.filter_bad_descendants(
-                children=children, bad_parents=portrait.rejected_supertypes
-            )
-
-            # Save the rejected children as rejected ancestors
-            portrait.rejected_supertypes.update(
-                child for child in children if child not in remaining
-            )
-
-            for child in set(children) - remaining:
-                del children[child]
-
-            self.logger.debug(f"Filtered to {len(children)}")
-
-            # Iterate over descendants and ask LLM/Snowstorm if to include them
-            # to the new anchors
-            for child_id, child_term in children.items():
-                child_concept = self.snowstorm.get_concept(child_id)
-
-                supertype: bool = self.snowstorm.check_inferred_subsumption(
-                    child_concept, portrait
-                )
-
-                if not supertype:
-                    # This will prevent expensive re-queries on descendants
-                    portrait.rejected_supertypes.add(child_id)
-                    continue
-
-                # Primitive concepts must be confirmed by the LLM
-                primitive = not child_concept.defined
-                term_context = (
-                    "; ".join(portrait.context) if portrait.context else None
-                )
-                if primitive and not self.prompter.prompt_subsumption(
-                    term=portrait.source_term,
-                    prospective_supertype=child_term,
-                    term_context=term_context,
-                ):
-                    portrait.rejected_supertypes.add(child_id)
-                    continue
-
-                new_anchors.add(child_id)
-
-        if not new_anchors:
-            self.logger.debug("No new ancestors found")
-            return False
-
-        # Update the anchor set with the new one
-        self.logger.debug(
-            f"New ancestors: {new_anchors - portrait.ancestor_anchors}"
-        )
-        portrait.ancestor_anchors |= new_anchors
-        return True
-
     @classmethod
     def prepare(cls, terms: Iterable[str], logger: logging.Logger) -> Self:
         logger = logger.getChild(cls.__name__)
@@ -2424,48 +2178,30 @@ otherwise.
         start_time = datetime.datetime.now()
         self.logger.info(f"Started at: {start_time}")
 
-        if not self.prompter.ping():
-            self.logger.error("API is not available!")
-            raise BouzygesError("API is not available")
+        workers = [
+            _BouzygesWorker(i, portrait, self)
+            for i, portrait in enumerate(self.portraits.values())
+        ]
 
-        self.populate_attribute_candidates()
-        self.populate_unchecked_attributes()
-        self.update_existing_attr_values()
-        self.logger.info("Attributes:")
-        for term, portrait in self.portraits.items():
-            self.logger.info(f" - {term} attributes:")
-            for attribute, value in portrait.attributes.items():
-                self.logger.info(f"   - {attribute} {value}")
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            results: Iterable[dict[SCTID, SCTDescription]] = executor.map(
+                lambda w: w.run(), workers
+            )
 
-        for term, portrait in self.portraits.items():
-            changes_made = updated = True
-
-            while changes_made:
-                cycles = 0
-                while updated:
-                    updated = self.update_anchors(term)
-                    cycles += updated
-                changes_made = bool(cycles)
-
-            self.snowstorm.remove_redundant_ancestors(portrait)
-
-        # Print resulting supertypes
-        for term, portrait in self.portraits.items():
-            self.logger.info("Attributes:")
-            self.logger.info(f" - {term} attributes:")
-            for attribute, value in portrait.attributes.items():
-                self.logger.info(f"   - {attribute} {value}")
-
-            self.logger.info(f"{term} supertypes:")
-            for anchor in portrait.ancestor_anchors:
-                ancestor = self.snowstorm.get_concept(anchor)
-                self.logger.info(f" - {ancestor.sctid} {ancestor.pt}")
-
-        self.logger.info(f"Started at: {start_time}")
+        self.logger.info("Routine finished")
         self.logger.info(
-            f"Time taken (s): "
-            f"{(datetime.datetime.now() - start_time).total_seconds()}"
+            f"Time taken (s): {(datetime.datetime.now() - start_time).total_seconds()}"
         )
+
+        self.output(results)
+
+    def output(self, results: Iterable[dict[SCTID, SCTDescription]]):
+        # TODO: write to file
+        print("Results:")
+        for term, result in zip(self.portraits, results):
+            print(f" - {term}:")
+            for sctid, term in result.items():
+                print(f"    - {sctid} {term}")
 
     def run(self):
         """\
@@ -2483,6 +2219,309 @@ Run the Bouzyges system.
         else:
             self._run()
         self.prompter.report_usage()
+
+
+class _BouzygesWorker:
+    """\
+Worker thread for the Bouzyges system, performing the main logic. on a single
+source term.
+"""
+
+    def __init__(
+        self, idx: int, portrait: SemanticPortrait, bouzyges: Bouzyges
+    ):
+        self.source_term = portrait.source_term
+        self.portrait = portrait
+
+        self.logger = bouzyges.logger.getChild(f"Worker {idx}:")
+        self.snowstorm = bouzyges.snowstorm
+        self.prompter = bouzyges.prompter
+        self.mrcm_entries = bouzyges.mrcm_entries
+
+        self.logger.info(f"Worker {idx} for '{self.source_term}' is ready")
+
+    def run(self) -> dict[SCTID, SCTDescription]:
+        start_time = datetime.datetime.now()
+        self.logger.info(f"Started at: {start_time}")
+
+        self.initialize_supertypes()
+        self.populate_attribute_candidates()
+        self.populate_unchecked_attributes()
+        self.update_existing_attr_values()
+        self.logger.info(f" - {self.source_term} attributes:")
+        for attribute, value in self.portrait.attributes.items():
+            self.logger.info(f"   - {attribute} {value}")
+
+        changes_made = updated = True
+        while changes_made:
+            cycles = 0
+            while updated:
+                updated = self.update_anchors()
+                cycles += updated
+            changes_made = bool(cycles)
+
+        self.snowstorm.remove_redundant_ancestors(self.portrait)
+
+        # Log resulting supertypes
+        self.logger.info("Attributes:")
+        self.logger.info(f" - {self.source_term} attributes:")
+        for attribute, value in self.portrait.attributes.items():
+            self.logger.info(f"   - {attribute} {value}")
+
+        self.logger.info(f"{self.source_term} supertypes:")
+
+        anchors: dict[SCTID, SCTDescription] = {}
+        for anchor in self.portrait.ancestor_anchors:
+            ancestor = self.snowstorm.get_concept(anchor)
+            self.logger.info(f" - {ancestor.sctid} {ancestor.pt}")
+            anchors[ancestor.sctid] = ancestor.pt
+
+        self.logger.info(f"Started at: {start_time}")
+        self.logger.info(
+            f"Time taken (s): "
+            f"{(datetime.datetime.now() - start_time).total_seconds()}"
+        )
+
+        return anchors
+
+    def initialize_supertypes(self):
+        """\
+Initialize supertypes for all terms to start building portraits.
+"""
+        if self.portrait.ancestor_anchors:
+            raise BouzygesError(
+                "Should not happen: ancestor anchors are set, "
+                "and yet initialize_supertypes is called"
+            )
+
+        supertypes_decode = {
+            entry.term: entry.sctid for entry in self.mrcm_entries
+        }
+        supertype_term = self.prompter.prompt_supertype(
+            term=self.source_term,
+            options=supertypes_decode,
+            allow_escape=False,
+            term_context="; ".join(self.portrait.context)
+            if self.portrait.context
+            else None,
+        )
+        match supertype_term:
+            case SCTDescription(answer_term):
+                supertype = supertypes_decode[answer_term]
+                self.logger.info(
+                    f"Assuming {self.source_term} is {answer_term}"
+                )
+                self.portrait.ancestor_anchors.add(supertype)
+            case _:
+                raise BouzygesError(
+                    "Should not happen: null-like response from prompter; "
+                    "did the Prompter inject the escape hatch?"
+                )
+
+    def populate_attribute_candidates(self) -> None:
+        attributes = self.snowstorm.get_attribute_suggestions(
+            self.portrait.ancestor_anchors
+        )
+
+        # Remove previously rejected attributes
+        for attribute in self.portrait.rejected_attributes:
+            attributes.pop(attribute, None)
+
+        self.logger.debug("Possible attributes for: " + self.source_term)
+        for sctid, attribute in attributes.items():
+            self.logger.debug(f" - {sctid} {attribute.pt}")
+
+        # Confirm the attributes
+        for attribute in attributes.values():
+            accept = self.prompter.prompt_attr_presence(
+                term=self.source_term,
+                attribute=attribute.pt,
+                term_context="; ".join(self.portrait.context)
+                if self.portrait.context
+                else None,
+            )
+            self.logger.info(
+                f"{attribute.sctid} {attribute.pt}: " + "Present"
+                if accept
+                else "Not present"
+            )
+
+            if accept:
+                self.portrait.unchecked_attributes.add(attribute.sctid)
+
+        # Remember the constraints
+        for sctid, attribute in attributes.items():
+            if sctid not in self.portrait.unchecked_attributes:
+                continue
+            self.portrait.relevant_constraints[sctid] = attribute
+
+    def populate_unchecked_attributes(self) -> None:
+        rejected = set()
+        for attribute in self.portrait.unchecked_attributes:
+            self.logger.debug(f"Attribute: {attribute}")
+            # Get possible attribute values
+            values_options = self.snowstorm.get_attribute_values(
+                self.portrait, attribute
+            )
+            self.logger.debug(f"Values: {values_options}")
+
+            if not values_options:
+                # No valid values for this attribute and parent combination
+                rejected.add(attribute)
+                continue
+            else:
+                self.logger.info(f"Possible values for: {attribute}")
+                for value in values_options:
+                    self.logger.info(f" - {value}")
+
+            # Prompt for the value
+            value_term = self.prompter.prompt_attr_value(
+                term=self.source_term,
+                attribute=self.portrait.relevant_constraints[attribute].pt,
+                options=values_options.values(),
+                term_context="; ".join(self.portrait.context)
+                if self.portrait.context
+                else None,
+                allow_escape=True,
+            )
+
+            match value_term:
+                case SCTDescription(answer_term):
+                    sctid = next(
+                        SCTID(sctid)
+                        for sctid, term in values_options.items()
+                        if term == answer_term
+                    )
+                    self.portrait.attributes[attribute] = sctid
+                case EscapeHatch.WORD:
+                    # Choosing no attribute on initial prompt
+                    # means rejection
+                    rejected.add(attribute)
+
+        self.portrait.rejected_attributes |= rejected
+        # All are seen by now
+        self.portrait.unchecked_attributes = set()
+
+    def update_existing_attr_values(self) -> None:
+        """\
+Update existing attribute values with the most precise descendant for all terms.
+"""
+        new_attributes = {}
+        for attribute, value in self.portrait.attributes.items():
+            new_attributes[attribute] = value
+            while True:
+                # Get children of the current value
+                children = self.snowstorm.get_concept_children(
+                    new_attributes[attribute]
+                )
+                if not children:
+                    # Leaf node
+                    break
+
+                descriptions = {v: k for k, v in children.items()}
+
+                # Prompt for the most precise value
+                value_term = self.prompter.prompt_attr_value(
+                    term=self.source_term,
+                    attribute=self.portrait.relevant_constraints[attribute].pt,
+                    options=descriptions,
+                    term_context="; ".join(self.portrait.context)
+                    if self.portrait.context
+                    else None,
+                    allow_escape=True,
+                )
+
+                if isinstance(value_term, EscapeHatch):
+                    # None of the children are correct
+                    break
+
+                new_attributes[attribute] = descriptions[value_term]
+
+        self.portrait.attributes.update(new_attributes)
+
+    def update_anchors(self) -> bool:
+        i = 0
+        ancestors_changed = True
+        while ancestors_changed:
+            ancestors_changed = self.__update_anchor()
+            i += ancestors_changed
+        self.logger.info(
+            f"Updated {self.source_term} anchors in {i} iterations."
+        )
+        return i > 1
+
+    def __update_anchor(self) -> bool:
+        """\
+Update the ancestor anchors for one term to more precise children. Performs a
+single iteration. Return True if the parent anchors have changed, False
+otherwise.
+"""
+        new_anchors = set()
+        for anchor in self.portrait.ancestor_anchors:
+            # Get all immediate descendants
+            children = self.snowstorm.get_concept_children(anchor)
+            self.logger.debug(f"Filtering {len(children)} children of {anchor}")
+
+            # Remove verbatim known ancestors
+            for known_ancestor in self.portrait.ancestor_anchors:
+                children.pop(known_ancestor, None)
+
+            # Filter previously rejected ancestors including meta-ancestors
+            remaining = self.snowstorm.filter_bad_descendants(
+                children=children, bad_parents=self.portrait.rejected_supertypes
+            )
+
+            # Save the rejected children as rejected ancestors
+            self.portrait.rejected_supertypes.update(
+                child for child in children if child not in remaining
+            )
+
+            for child in set(children) - remaining:
+                del children[child]
+
+            self.logger.debug(f"Filtered to {len(children)}")
+
+            # Iterate over descendants and ask LLM/Snowstorm if to include them
+            # to the new anchors
+            for child_id, child_term in children.items():
+                child_concept = self.snowstorm.get_concept(child_id)
+
+                supertype: bool = self.snowstorm.check_inferred_subsumption(
+                    child_concept, self.portrait
+                )
+
+                if not supertype:
+                    # This will prevent expensive re-queries on descendants
+                    self.portrait.rejected_supertypes.add(child_id)
+                    continue
+
+                # Primitive concepts must be confirmed by the LLM
+                primitive = not child_concept.defined
+                term_context = (
+                    "; ".join(self.portrait.context)
+                    if self.portrait.context
+                    else None
+                )
+                if primitive and not self.prompter.prompt_subsumption(
+                    term=self.portrait.source_term,
+                    prospective_supertype=child_term,
+                    term_context=term_context,
+                ):
+                    self.portrait.rejected_supertypes.add(child_id)
+                    continue
+
+                new_anchors.add(child_id)
+
+        if not new_anchors:
+            self.logger.debug("No new ancestors found")
+            return False
+
+        # Update the anchor set with the new one
+        self.logger.debug(
+            f"New ancestors: {new_anchors - self.portrait.ancestor_anchors}"
+        )
+        self.portrait.ancestor_anchors |= new_anchors
+        return True
 
 
 # https://stackoverflow.com/questions/28655198/best-way-to-display-logs-in-pyqt
