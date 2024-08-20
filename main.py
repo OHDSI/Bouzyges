@@ -11,6 +11,7 @@ import re
 import sqlite3
 import sys
 import threading
+import tenacity
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Iterable, Literal, Mapping, Self, TypeVar
@@ -164,8 +165,14 @@ NULL_ANSWER = EscapeHatch()
 IS_A = SCTID(116680003)
 
 
-# SNOMED root concept
+### SNOMED root concept
 ROOT_CONCEPT = SCTID(138875005)
+
+### Temporary substitute for reading from a file
+# TERMS = ["Pyogenic abscess of liver", "Invasive lobular carcinoma of breast"]
+TERMS = [
+    "Pyogenic abscess of liver",
+]
 
 
 ## Dataclasses
@@ -1562,9 +1569,8 @@ A prompter that interfaces with the OpenAI API using.
             messages = prompt.prompt_message
 
         try:
-            brain_answer = self._client.chat.completions.create(
+            brain_answer = self._get_completion(
                 messages=messages,  # type: ignore
-                model=self._model_id,
                 **(prompt.api_options or {}),
             )
         except openai.APIError as e:
@@ -1604,6 +1610,16 @@ A prompter that interfaces with the OpenAI API using.
                     prompt, parser, parse_retries_left - 1
                 )
             raise PrompterError("Failed to parse the answer")
+
+    @tenacity.retry(
+        wait=tenacity.wait_random_exponential(multiplier=1, max=60),
+    )
+    def _get_completion(self, messages, **kwargs):
+        return self._client.chat.completions.create(
+            messages=messages,  # type: ignore
+            model=self._model_id,
+            **kwargs,
+        )
 
     def report_usage(self) -> None:
         self.logger.info("Reporting usage to the OpenAI API...")
@@ -2654,7 +2670,7 @@ Main window and start config for the Bouzyges system.
 
         def get_bouzyges():
             bouzyges_capture["success"] = Bouzyges.prepare(
-                terms=["Pyogenic abscess of liver"],
+                terms=TERMS,
                 logger=LOGGER,
             )
 
