@@ -14,6 +14,7 @@ import re
 import sqlite3
 import sys
 import threading
+import unittest
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Iterable, Literal, Mapping, Self, TypeVar
@@ -593,12 +594,10 @@ Get the answer from the cache for specified model.
 
         # Shape the prompt text
         if prompt.api_options:
-            api_options = json.dumps(
-                {
-                    key: prompt.api_options[key]
-                    for key in sorted(prompt.api_options)
-                }
-            )
+            api_options = json.dumps({
+                key: prompt.api_options[key]
+                for key in sorted(prompt.api_options)
+            })
             query += " = ? ;"
         else:
             api_options = None
@@ -627,12 +626,10 @@ Remember the answer for the prompt for the specified model.
             VALUES (?, ?, ?, ?, ?)
         """
         if prompt.api_options:
-            api_options = json.dumps(
-                {
-                    key: prompt.api_options[key]
-                    for key in sorted(prompt.api_options)
-                }
-            )
+            api_options = json.dumps({
+                key: prompt.api_options[key]
+                for key in sorted(prompt.api_options)
+            })
         else:
             api_options = None
         cursor = self.connection.cursor()
@@ -974,25 +971,21 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         options_context: dict[SCTDescription, str] | None = None,
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape)
-        prompt.append(
+        prompt.append((
+            "user",
             (
+                f"Given the term '{term}', what is the closest supertype or "
+                "exact equivalent of it's meaning from the following options?"
+            ),
+        ))
+        if term_context:
+            prompt.append((
                 "user",
                 (
-                    f"Given the term '{term}', what is the closest supertype or "
-                    "exact equivalent of it's meaning from the following options?"
+                    "Following information is provided about the term: "
+                    + term_context
                 ),
-            )
-        )
-        if term_context:
-            prompt.append(
-                (
-                    "user",
-                    (
-                        "Following information is provided about the term: "
-                        + term_context
-                    ),
-                )
-            )
+            ))
 
         options_text = "Options, in no particular order:\n"
         for option in sorted(options):  # Sort for cache consistency
@@ -1020,38 +1013,30 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         attribute_context: str | None = None,
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape=False)
-        prompt.append(
-            (
-                "user",
-                f"Is the attribute '{attribute}' present in the term '{term}'?",
-            )
-        )
+        prompt.append((
+            "user",
+            f"Is the attribute '{attribute}' present in the term '{term}'?",
+        ))
         if term_context:
-            prompt.append(
-                (
-                    "user",
-                    (
-                        "Following information is provided about the term: "
-                        + term_context
-                    ),
-                )
-            )
-        if attribute_context:
-            prompt.append(
-                (
-                    "user",
-                    "Attribute is defined as follows: " + attribute_context,
-                )
-            )
-
-        prompt.append(
-            (
+            prompt.append((
                 "user",
-                f"""Options are:
+                (
+                    "Following information is provided about the term: "
+                    + term_context
+                ),
+            ))
+        if attribute_context:
+            prompt.append((
+                "user",
+                "Attribute is defined as follows: " + attribute_context,
+            ))
+
+        prompt.append((
+            "user",
+            f"""Options are:
 - {BooleanAnswer.YES}: The attribute is guaranteed present.
 - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.""",
-            )
-        )
+        ))
 
         return self.__finalise_prompt(
             prompt,
@@ -1070,36 +1055,30 @@ Outputs prompts as JSONs and contains sensible API option defaults.
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape=allow_escape)
 
-        prompt.append(
+        prompt.append((
+            "user",
             (
-                "user",
-                (
-                    f"Choose the value of the attribute '{attribute}' "
-                    f"in the term '{term}'. The answer should be the best "
-                    f"matching option, either exact, or a likely supertype "
-                    f"of an actual value."
-                ),
-            )
-        )
+                f"Choose the value of the attribute '{attribute}' "
+                f"in the term '{term}'. The answer should be the best "
+                f"matching option, either exact, or a likely supertype "
+                f"of an actual value."
+            ),
+        ))
 
         if term_context:
-            prompt.append(
+            prompt.append((
+                "user",
                 (
-                    "user",
-                    (
-                        " Following information is provided about the term: "
-                        + term_context
-                    ),
-                )
-            )
+                    " Following information is provided about the term: "
+                    + term_context
+                ),
+            ))
 
         if attribute_context:
-            prompt.append(
-                (
-                    "user",
-                    (" Attribute is defined as follows: " + attribute_context),
-                )
-            )
+            prompt.append((
+                "user",
+                (" Attribute is defined as follows: " + attribute_context),
+            ))
 
         options_text = "Options, in no particular order:\n"
         for option in sorted(options):  # Sort for cache consistency
@@ -1128,46 +1107,38 @@ Outputs prompts as JSONs and contains sensible API option defaults.
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape=False)
 
-        prompt.append(
+        prompt.append((
+            "user",
             (
-                "user",
-                (
-                    f"Is the term '{term}' a subtype of the concept "
-                    f"'{prospective_supertype}'?"
-                ),
-            )
-        )
+                f"Is the term '{term}' a subtype of the concept "
+                f"'{prospective_supertype}'?"
+            ),
+        ))
 
         if term_context:
-            prompt.append(
+            prompt.append((
+                "user",
                 (
-                    "user",
-                    (
-                        " Following information is provided about the term: "
-                        + term_context
-                    ),
-                )
-            )
+                    " Following information is provided about the term: "
+                    + term_context
+                ),
+            ))
 
         if supertype_context:
-            prompt.append(
-                (
-                    "user",
-                    (
-                        " Following information is provided about the concept: "
-                        + supertype_context
-                    ),
-                )
-            )
-
-        prompt.append(
-            (
+            prompt.append((
                 "user",
-                f"""Options are:
+                (
+                    " Following information is provided about the concept: "
+                    + supertype_context
+                ),
+            ))
+
+        prompt.append((
+            "user",
+            f"""Options are:
  - {BooleanAnswer.YES}: The term is a subtype of the concept.
  - {BooleanAnswer.NO}: The term is not a subtype of the concept.""",
-            )
-        )
+        ))
 
         return self.__finalise_prompt(
             prompt,
@@ -2183,12 +2154,13 @@ Parse the file into a list of SemanticPortrait objects
         if self.content is None:
             raise BouzygesError("No content to parse")
 
-        return list(self.content.apply(self.__portrait_from_row, axis=1))
+        return list(self.content.apply(self._portrait_from_row, axis=1))
 
-    def __portrait_from_row(self, row: pd.Series) -> SemanticPortrait:
+    @staticmethod
+    def _portrait_from_row(row: pd.Series) -> SemanticPortrait:
         # TODO: Save vocab and code for later use
         _ = row["vocab"], row["code"]
-        term = row["term"]
+        term = str(row["term"])
         context = [
             str(v)
             for k, v in row.to_dict().items()
@@ -2197,6 +2169,27 @@ Parse the file into a list of SemanticPortrait objects
         return SemanticPortrait(
             term,
             context,
+        )
+
+
+class TestFileReader(unittest.TestCase):
+    def setUp(self) -> None:
+        self.row = pd.Series({
+            "vocab": "ICD-42",
+            "code": 123456,
+            "term": "Test term",
+            "foo": "Test context",
+            "bar": "Another context",
+        })
+        return super().setUp()
+
+    def test_parse(self):
+        portrait = FileReader._portrait_from_row(self.row)
+        self.assertEqual(portrait.source_term, "Test term")
+        self.assertIsNot(portrait.context, None)
+        self.assertEqual(
+            set(portrait.context),  # type: ignore
+            {"Test context", "Another context"},
         )
 
 
