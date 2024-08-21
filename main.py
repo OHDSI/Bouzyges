@@ -212,6 +212,7 @@ Parameters for reading and writing file data.
 
     sep: str = "Tab"
     quotechar: str = '"'
+    quoting: int = csv.QUOTE_MINIMAL
 
     def __init__(self, file: str, name: str) -> None:
         self._populate_layout()
@@ -230,12 +231,13 @@ Parameters for reading and writing file data.
         self.layout.addWidget(quoting_policy)
         qchar_label = QtWidgets.QLabel("Quote character:")
         self.layout.addWidget(qchar_label)
-        quote_char = QtWidgets.QLineEdit()
-        quote_char.setPlaceholderText("Quote character")
-        quote_char.setText('"')
-        quote_char.setMaximumWidth(30)
-        quote_char.textChanged.connect(self.quote_char_changed)
-        self.layout.addWidget(quote_char)
+        self.quote_char = QtWidgets.QLineEdit()
+        self.quote_char.setPlaceholderText('"')
+        self.quote_char.setText('"')
+        self.quote_char.setMaximumWidth(30)
+        self.quote_char.textChanged.connect(self.quote_char_changed)
+        self.quote_char.setEnabled(self.quoting != csv.QUOTE_NONE)
+        self.layout.addWidget(self.quote_char)
         spacer = QtWidgets.QSpacerItem(
             40,
             20,
@@ -254,6 +256,7 @@ Parameters for reading and writing file data.
             f"Quoting policy changed to: {self.quoting}:"
             f"{QUOTING_POLICY[self.quoting]}"
         )
+        self.quote_char.setEnabled(self.quoting != csv.QUOTE_NONE)
 
     def quote_char_changed(self, text) -> None:
         self.quotechar = text
@@ -3029,7 +3032,7 @@ Main window and start config for the Bouzyges system.
 
         # Options
         self.options_container = QtWidgets.QWidget()
-        self.options_container.setMaximumWidth(600)
+        self.options_container.setMaximumWidth(350)
         options_layout = QtWidgets.QVBoxLayout()
         options_subtitle = QtWidgets.QLabel("Options")
         options_subtitle.setStyleSheet("font-weight: bold;")
@@ -3037,6 +3040,13 @@ Main window and start config for the Bouzyges system.
         options_contents = QtWidgets.QVBoxLayout()
         self.__populate_option_contents(options_contents)
         options_layout.addLayout(options_contents)
+        spacer = QtWidgets.QSpacerItem(
+            20,
+            40,
+            QtWidgets.QSizePolicy.Policy.Minimum,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        options_layout.addItem(spacer)
         self.options_container.setLayout(options_layout)
 
         # Input and output
@@ -3061,7 +3071,7 @@ Main window and start config for the Bouzyges system.
 
         # Logging space
         logging_layout = QtWidgets.QVBoxLayout()
-        logging_subtitle = QtWidgets.QLabel("Logging")
+        logging_subtitle = QtWidgets.QLabel("Run log")
         logging_subtitle.setStyleSheet("font-weight: bold;")
         self.log_display = BouzygesLoggingSpace()
 
@@ -3305,9 +3315,18 @@ Main window and start config for the Bouzyges system.
         sqlite_layout.addLayout(sqlite_selector_layout)
 
         # Developer options
-        dev_label = QtWidgets.QLabel("Profiling and logging:")
-        dev_label.setStyleSheet("font-weight: bold;")
-        dev_layout = QtWidgets.QHBoxLayout()
+        prof_label = QtWidgets.QLabel("Profiling:")
+        prof_label.setStyleSheet("font-weight: bold;")
+        prof_layout = QtWidgets.QHBoxLayout()
+
+        early_termination_label = QtWidgets.QLabel("Stop execution after (s):")
+        early_termination_input = QtWidgets.QLineEdit()
+        early_termination_input.setPlaceholderText("don't")
+        if PARAMS.prof.stop_profiling_after_seconds is not None:
+            early_termination_input.setText(
+                str(PARAMS.prof.stop_profiling_after_seconds)
+            )
+        early_termination_input.textChanged.connect(self.et_changed)
 
         profiling_layout = QtWidgets.QVBoxLayout()
         profiling_checkbox = QtWidgets.QCheckBox("Generate stats.prof")
@@ -3315,19 +3334,18 @@ Main window and start config for the Bouzyges system.
         profiling_checkbox.stateChanged.connect(self.profiling_changed)
         profiling_layout.addWidget(profiling_checkbox)
 
-        early_termination_layout = QtWidgets.QVBoxLayout()
-        early_termination_label = QtWidgets.QLabel("Stop execution after(s):")
-        early_termination_input = QtWidgets.QLineEdit()
-        early_termination_input.setPlaceholderText("Do not stop")
-        if PARAMS.prof.stop_profiling_after_seconds is not None:
-            early_termination_input.setText(
-                str(PARAMS.prof.stop_profiling_after_seconds)
-            )
-        early_termination_input.textChanged.connect(self.et_changed)
-        early_termination_layout.addWidget(early_termination_label)
-        early_termination_layout.addWidget(early_termination_input)
+        prof_layout.addWidget(early_termination_label)
+        prof_layout.addWidget(early_termination_input)
+        prof_layout.addLayout(profiling_layout)
 
-        logging_level_layout = QtWidgets.QVBoxLayout()
+        logging_label = QtWidgets.QLabel("Logging:")
+        logging_label.setStyleSheet("font-weight: bold;")
+        logging_layout = QtWidgets.QHBoxLayout()
+
+        log_to_file_checkbox = QtWidgets.QCheckBox("Log to file")
+        log_to_file_checkbox.setChecked(PARAMS.log.log_to_file)
+        log_to_file_checkbox.stateChanged.connect(self.ltf_changed)
+
         logging_level_label = QtWidgets.QLabel("Logging level:")
         logging_level_options = QtWidgets.QComboBox()
         logging_level_options.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -3340,23 +3358,17 @@ Main window and start config for the Bouzyges system.
         logging_level_options.setCurrentIndex(current_logging_level_idx)
         logging_level_options.currentIndexChanged.connect(self.ll_changed)
 
-        log_to_file_checkbox = QtWidgets.QCheckBox("Log to file")
-        log_to_file_checkbox.setChecked(PARAMS.log.log_to_file)
-        log_to_file_checkbox.stateChanged.connect(self.ltf_changed)
-
-        logging_level_layout.addWidget(logging_level_label)
-        logging_level_layout.addWidget(log_to_file_checkbox)
-        logging_level_layout.addWidget(logging_level_options)
-
-        dev_layout.addLayout(profiling_layout)
-        dev_layout.addLayout(early_termination_layout)
-        dev_layout.addLayout(logging_level_layout)
+        logging_layout.addWidget(logging_level_label)
+        logging_layout.addWidget(logging_level_options)
+        logging_layout.addWidget(log_to_file_checkbox)
 
         layout.addLayout(prompter_layout)
         layout.addLayout(snowstorm_layout)
         layout.addLayout(sqlite_layout)
-        layout.addWidget(dev_label)
-        layout.addLayout(dev_layout)
+        layout.addWidget(prof_label)
+        layout.addLayout(prof_layout)
+        layout.addWidget(logging_label)
+        layout.addLayout(logging_layout)
 
     def ltf_changed(self, state) -> None:
         PARAMS.log.log_to_file = state == 2
