@@ -68,6 +68,10 @@ class ECLExpression(str):
     """Expression Constraint Language expression"""
 
 
+class SCGExpression(str):
+    """SNOMED CT Compositional Grammar expression"""
+
+
 class URL(str):
     """REST URL string"""
 
@@ -188,15 +192,15 @@ Parameters that reflect the environment variables.
 
 
 @dataclass
-class InputParameters:
+class IOParameters:
     """\
-Parameters for reading input data.
+Parameters for reading and writing file data.
 """
 
     file: str | None = None
     sep: str = "Tab"
     quotechar: str = '"'
-    quoting: int = csv.QUOTE_MINIMAL
+    quoting: int = csv.QUOTE_ALL
 
 
 class RunParameters:
@@ -208,7 +212,8 @@ Parameters for the run of the program.
     env: EnvironmentParameters = EnvironmentParameters()
     log: LoggingParameters = LoggingParameters()
     prof: ProfilingParameters = ProfilingParameters()
-    read: InputParameters = InputParameters()
+    read: IOParameters = IOParameters()
+    write: IOParameters = IOParameters()
 
 
 PARAMS = RunParameters()
@@ -483,7 +488,12 @@ class SemanticPortrait:
     """\
 Represents an interactively built semantic portrait of a source concept."""
 
-    def __init__(self, term: str, context: Iterable[str] | None = None) -> None:
+    def __init__(
+        self,
+        term: str,
+        context: Iterable[str] | None = None,
+        metadata: frozendict[str, JsonPrimitive] = frozendict(),
+    ) -> None:
         self.source_term: str = term
         self.context: Iterable[str] | None = context
         self.ancestor_anchors: set[SCTID] = set()
@@ -494,6 +504,23 @@ Represents an interactively built semantic portrait of a source concept."""
         self.rejected_supertypes: set[SCTID] = set()
 
         self.relevant_constraints: dict[SCTID, AttributeConstraints] = {}
+
+        self.metadata: frozendict[str, JsonPrimitive] = metadata
+
+    def to_scg(self: SemanticPortrait) -> SCGExpression:
+        """\
+Convert a SemanticPortrait to a SNOMED CT Post-Coordinated Expression
+"""
+        # Always Subtype
+        prefix = "<<<"
+        focus_concepts = "+".join(str(a) for a in self.ancestor_anchors)
+        attributes = ",".join(f"{a}={v}" for a, v in self.attributes.items())
+        return SCGExpression(
+            prefix
+            + (focus_concepts or str(ROOT_CONCEPT))
+            + ":" * bool(attributes)
+            + attributes
+        )
 
 
 ## Exceptions
@@ -594,10 +621,12 @@ Get the answer from the cache for specified model.
 
         # Shape the prompt text
         if prompt.api_options:
-            api_options = json.dumps({
-                key: prompt.api_options[key]
-                for key in sorted(prompt.api_options)
-            })
+            api_options = json.dumps(
+                {
+                    key: prompt.api_options[key]
+                    for key in sorted(prompt.api_options)
+                }
+            )
             query += " = ? ;"
         else:
             api_options = None
@@ -626,10 +655,12 @@ Remember the answer for the prompt for the specified model.
             VALUES (?, ?, ?, ?, ?)
         """
         if prompt.api_options:
-            api_options = json.dumps({
-                key: prompt.api_options[key]
-                for key in sorted(prompt.api_options)
-            })
+            api_options = json.dumps(
+                {
+                    key: prompt.api_options[key]
+                    for key in sorted(prompt.api_options)
+                }
+            )
         else:
             api_options = None
         cursor = self.connection.cursor()
@@ -971,21 +1002,25 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         options_context: dict[SCTDescription, str] | None = None,
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape)
-        prompt.append((
-            "user",
+        prompt.append(
             (
-                f"Given the term '{term}', what is the closest supertype or "
-                "exact equivalent of it's meaning from the following options?"
-            ),
-        ))
-        if term_context:
-            prompt.append((
                 "user",
                 (
-                    "Following information is provided about the term: "
-                    + term_context
+                    f"Given the term '{term}', what is the closest supertype or "
+                    "exact equivalent of it's meaning from the following options?"
                 ),
-            ))
+            )
+        )
+        if term_context:
+            prompt.append(
+                (
+                    "user",
+                    (
+                        "Following information is provided about the term: "
+                        + term_context
+                    ),
+                )
+            )
 
         options_text = "Options, in no particular order:\n"
         for option in sorted(options):  # Sort for cache consistency
@@ -1013,30 +1048,38 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         attribute_context: str | None = None,
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape=False)
-        prompt.append((
-            "user",
-            f"Is the attribute '{attribute}' present in the term '{term}'?",
-        ))
+        prompt.append(
+            (
+                "user",
+                f"Is the attribute '{attribute}' present in the term '{term}'?",
+            )
+        )
         if term_context:
-            prompt.append((
-                "user",
+            prompt.append(
                 (
-                    "Following information is provided about the term: "
-                    + term_context
-                ),
-            ))
+                    "user",
+                    (
+                        "Following information is provided about the term: "
+                        + term_context
+                    ),
+                )
+            )
         if attribute_context:
-            prompt.append((
-                "user",
-                "Attribute is defined as follows: " + attribute_context,
-            ))
+            prompt.append(
+                (
+                    "user",
+                    "Attribute is defined as follows: " + attribute_context,
+                )
+            )
 
-        prompt.append((
-            "user",
-            f"""Options are:
+        prompt.append(
+            (
+                "user",
+                f"""Options are:
 - {BooleanAnswer.YES}: The attribute is guaranteed present.
 - {BooleanAnswer.NO}: The attribute is absent or not guaranteed present.""",
-        ))
+            )
+        )
 
         return self.__finalise_prompt(
             prompt,
@@ -1055,30 +1098,36 @@ Outputs prompts as JSONs and contains sensible API option defaults.
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape=allow_escape)
 
-        prompt.append((
-            "user",
+        prompt.append(
             (
-                f"Choose the value of the attribute '{attribute}' "
-                f"in the term '{term}'. The answer should be the best "
-                f"matching option, either exact, or a likely supertype "
-                f"of an actual value."
-            ),
-        ))
-
-        if term_context:
-            prompt.append((
                 "user",
                 (
-                    " Following information is provided about the term: "
-                    + term_context
+                    f"Choose the value of the attribute '{attribute}' "
+                    f"in the term '{term}'. The answer should be the best "
+                    f"matching option, either exact, or a likely supertype "
+                    f"of an actual value."
                 ),
-            ))
+            )
+        )
+
+        if term_context:
+            prompt.append(
+                (
+                    "user",
+                    (
+                        " Following information is provided about the term: "
+                        + term_context
+                    ),
+                )
+            )
 
         if attribute_context:
-            prompt.append((
-                "user",
-                (" Attribute is defined as follows: " + attribute_context),
-            ))
+            prompt.append(
+                (
+                    "user",
+                    (" Attribute is defined as follows: " + attribute_context),
+                )
+            )
 
         options_text = "Options, in no particular order:\n"
         for option in sorted(options):  # Sort for cache consistency
@@ -1107,38 +1156,46 @@ Outputs prompts as JSONs and contains sensible API option defaults.
     ) -> Prompt:
         prompt = self._form_shared_history(allow_escape=False)
 
-        prompt.append((
-            "user",
+        prompt.append(
             (
-                f"Is the term '{term}' a subtype of the concept "
-                f"'{prospective_supertype}'?"
-            ),
-        ))
+                "user",
+                (
+                    f"Is the term '{term}' a subtype of the concept "
+                    f"'{prospective_supertype}'?"
+                ),
+            )
+        )
 
         if term_context:
-            prompt.append((
-                "user",
+            prompt.append(
                 (
-                    " Following information is provided about the term: "
-                    + term_context
-                ),
-            ))
+                    "user",
+                    (
+                        " Following information is provided about the term: "
+                        + term_context
+                    ),
+                )
+            )
 
         if supertype_context:
-            prompt.append((
-                "user",
+            prompt.append(
                 (
-                    " Following information is provided about the concept: "
-                    + supertype_context
-                ),
-            ))
+                    "user",
+                    (
+                        " Following information is provided about the concept: "
+                        + supertype_context
+                    ),
+                )
+            )
 
-        prompt.append((
-            "user",
-            f"""Options are:
+        prompt.append(
+            (
+                "user",
+                f"""Options are:
  - {BooleanAnswer.YES}: The term is a subtype of the concept.
  - {BooleanAnswer.NO}: The term is not a subtype of the concept.""",
-        ))
+            )
+        )
 
         return self.__finalise_prompt(
             prompt,
@@ -2116,14 +2173,16 @@ A class to read and parse files.
 """
 
     input_doctext = """\
-Input file must be a CSV file with at least the following columns:
-<ul>
-    <li><pre>vocab</pre>: the vocabulary or code-system of the source term</li>
-    <li><pre>code</pre>: the unique code for a source term</li>
-    <li><pre>term</pre>: the term to be analyzed</li>
-</ul>
-The rest of the columns are optional; any encountered value will be used as a
-context for the term.
+<span>
+    Input file must be a CSV file with at least the following columns:
+    <ul>
+        <li><code>vocab</code>: the vocabulary or code-system of the source term</li>
+        <li><code>code</code>: the unique code for a source term</li>
+        <li><code>term</code>: the term to be analyzed</li>
+    </ul>
+    The rest of the columns are optional; their values will be considered to be
+    additional context for the term.
+</span>
 """
 
     def __init__(self, path: str) -> None:
@@ -2141,6 +2200,7 @@ Read the file
         encoded_sep = PARAMS.read.sep
         df = pd.read_csv(
             self.path,
+            dtype=str,
             sep=decode_sep.get(encoded_sep, encoded_sep),
             quotechar=PARAMS.read.quotechar,
         )
@@ -2158,8 +2218,7 @@ Parse the file into a list of SemanticPortrait objects
 
     @staticmethod
     def _portrait_from_row(row: pd.Series) -> SemanticPortrait:
-        # TODO: Save vocab and code for later use
-        _ = row["vocab"], row["code"]
+        metadata = frozendict(vocab=str(row["vocab"]), code=str(row["code"]))
         term = str(row["term"])
         context = [
             str(v)
@@ -2169,18 +2228,21 @@ Parse the file into a list of SemanticPortrait objects
         return SemanticPortrait(
             term,
             context,
+            metadata,
         )
 
 
 class TestFileReader(unittest.TestCase):
     def setUp(self) -> None:
-        self.row = pd.Series({
-            "vocab": "ICD-42",
-            "code": 123456,
-            "term": "Test term",
-            "foo": "Test context",
-            "bar": "Another context",
-        })
+        self.row = pd.Series(
+            {
+                "vocab": "ICD-42",
+                "code": 123456,
+                "term": "Test term",
+                "foo": "Test context",
+                "bar": "Another context",
+            }
+        )
         return super().setUp()
 
     def test_parse(self):
@@ -2191,6 +2253,104 @@ class TestFileReader(unittest.TestCase):
             set(portrait.context),  # type: ignore
             {"Test context", "Another context"},
         )
+
+
+class FileWriter:
+    """\
+A class to write resulting files.
+"""
+
+    def __init__(self, path: str) -> None:
+        self.logger = LOGGER.getChild(self.__class__.__name__)
+        self.path = path
+        self.content: pd.DataFrame | None = None
+
+    def _write(self) -> None:
+        if self.content is None:
+            raise BouzygesError("No content to write")
+        self.logger.debug("Content ready")
+
+        self.logger.info(f"Writing to {self.path}")
+        self.content.to_csv(
+            self.path,
+            index=False,
+            sep=PARAMS.write.sep,
+            quotechar=PARAMS.write.quotechar,
+            quoting=PARAMS.write.quoting,
+            na_rep="",
+        )
+
+        self.logger.info(f"Written to {self.path}")
+
+    def to_scg(self, portraits: Iterable[SemanticPortrait]) -> None:
+        """\
+Write the results of term evaluation as a table of SNOMED CT Post-Coordinated
+Expressions.
+
+Does not normalize nor verify the expressions, nor considers grouping rules;
+some tools like CSIRO Ontoserver can do that. Unfortunately, normalization rules
+are not formally defined.
+"""
+        self.logger.debug("Writing to SCG format")
+        dicts = []
+        for portrait in portraits:
+            row = {}
+            row["term"] = portrait.source_term
+            row.update(portrait.attributes)
+            row["scg"] = portrait.to_scg()
+            dicts.append(row)
+            row["ancestors"] = (
+                f"[{','.join(map(str, portrait.ancestor_anchors))}]"
+            )
+        self.content = pd.DataFrame(dicts)
+        self._write()
+
+    def to_concept_relationship_stage(
+        self, portraits: Iterable[SemanticPortrait]
+    ) -> None:
+        """\
+Write the results of term evaluation as a table in format of of OMOP CDM
+concept_relationship table.
+
+Warning: This is a very naive implementation and does not consider the state and
+structure of SNOMED vocabulary in OMOP CDM. This will not respect actual
+standard status of the concepts, version incompatibility, etc. Post-processing
+WILL be required.
+
+This will also not check for duplicates in `code` and `vocab` columns, nor any
+other constraints.
+"""
+        self.logger.debug("Writing to CONCEPT_RELATIONSHIP_STAGE format")
+        dicts = []
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        for portrait in portraits:
+            if not portrait.ancestor_anchors:
+                self.logger.warning(
+                    f"No ancestors found for {portrait.source_term}"
+                )
+                continue
+
+            metadata = portrait.metadata
+            if not ("code" in metadata and "vocab" in metadata):
+                self.logger.warning(
+                    f"Crucial metadata missing for {portrait.source_term}!"
+                )
+                continue
+
+            for ancestor in portrait.ancestor_anchors:
+                row = {
+                    "concept_code_1": metadata["code"],
+                    "vocabulary_id_1": metadata["vocab"],
+                    "concept_code_2": ancestor,
+                    "vocabulary_id_2": "SNOMED",
+                    "relationship_id": "Is a",
+                    "valid_start_date": today,
+                    "valid_end_date": "2099-12-31",
+                    "invalid_reason": None,
+                }
+                dicts.append(row)
+        self.content = pd.DataFrame(dicts)
+        self._write()
 
 
 # Main logic host
@@ -2743,6 +2903,9 @@ Main window and start config for the Bouzyges system.
         input_subtitle = QtWidgets.QLabel("Input file")
         input_subtitle.setStyleSheet("font-weight: bold;")
         input_layout.addWidget(input_subtitle)
+        input_doc = QtWidgets.QLabel()
+        input_doc.setText(FileReader.input_doctext)
+        input_layout.addWidget(input_doc)
         input_contents = QtWidgets.QHBoxLayout()
         self.input_file = QtWidgets.QLineEdit()
         self.input_file.setPlaceholderText("Select input CSV file")
@@ -2752,10 +2915,8 @@ Main window and start config for the Bouzyges system.
         input_select.clicked.connect(self.select_input)
         input_contents.addWidget(input_select)
         input_options = QtWidgets.QHBoxLayout()
-        sep = QtWidgets.QLabel("Separator:")
-        input_options.addWidget(sep)
         separator = QtWidgets.QComboBox()
-        separator.addItems(SEPARATORS)
+        separator.addItems(map(lambda s: "Separator: " + s, SEPARATORS))
         separator.currentIndexChanged.connect(self.separator_changed)
         input_options.addWidget(separator)
         quoting_policy = QtWidgets.QComboBox()
@@ -2770,6 +2931,13 @@ Main window and start config for the Bouzyges system.
         quote_char.setMaximumWidth(30)
         quote_char.textChanged.connect(self.quote_char_changed)
         input_options.addWidget(quote_char)
+        spacer = QtWidgets.QSpacerItem(
+            40,
+            20,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Minimum,
+        )
+        input_options.addItem(spacer)
         input_layout.addLayout(input_contents)
         input_layout.addLayout(input_options)
 
