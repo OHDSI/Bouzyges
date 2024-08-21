@@ -48,6 +48,10 @@ except ImportError:
 
 
 # Boilerplate
+## Qt app
+app = QtWidgets.QApplication(sys.argv)
+
+
 ## Typing
 class BranchPath(str):
     """Snowstorm working branch"""
@@ -101,8 +105,10 @@ Boolean answer constants for prompters for yes/no questions
 
 PrompterOption = Literal["human", "openai", "azure"]
 JsonPrimitive = int | float | str | bool | None
+Json = dict[str, "Json"] | list["Json"] | JsonPrimitive
 OpenAIPromptRole = Literal["user", "system", "assisstant"]
 OpenAIMessages = tuple[frozendict[OpenAIPromptRole, str]]
+OutFormat = Literal["SCG", "CRS", "JSON"]
 T = TypeVar("T")
 
 ## Logging
@@ -191,7 +197,6 @@ Parameters that reflect the environment variables.
     azure_api_endpoint: str | None = os.getenv("AZURE_OPENAI_ENDPOINT")
 
 
-@dataclass
 class IOParameters:
     """\
 Parameters for reading and writing file data.
@@ -201,6 +206,56 @@ Parameters for reading and writing file data.
     sep: str = "Tab"
     quotechar: str = '"'
     quoting: int = csv.QUOTE_ALL
+
+    def __init__(self, parent_logger: logging.Logger, name: str) -> None:
+        self._populate_layout()
+        self.logger = parent_logger.getChild(name)
+
+    def _populate_layout(self) -> None:
+        self.layout = QtWidgets.QHBoxLayout()
+        separator = QtWidgets.QComboBox()
+        separator.addItems(map(lambda s: "Separator: " + s, SEPARATORS))
+        separator.currentIndexChanged.connect(self.separator_changed)
+        self.layout.addWidget(separator)
+        quoting_policy = QtWidgets.QComboBox()
+        quoting_policy.addItems(QUOTING_POLICY)
+        quoting_policy.currentIndexChanged.connect(self.quoting_policy_changed)
+        self.layout.addWidget(quoting_policy)
+        qchar_label = QtWidgets.QLabel("Quote character:")
+        self.layout.addWidget(qchar_label)
+        quote_char = QtWidgets.QLineEdit()
+        quote_char.setPlaceholderText("Quote character")
+        quote_char.setText('"')
+        quote_char.setMaximumWidth(30)
+        quote_char.textChanged.connect(self.quote_char_changed)
+        self.layout.addWidget(quote_char)
+        spacer = QtWidgets.QSpacerItem(
+            40,
+            20,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Minimum,
+        )
+        self.layout.addItem(spacer)
+
+    def separator_changed(self, index) -> None:
+        self.sep = SEPARATORS[index]
+        self.logger.debug(f"Separator changed to: {SEPARATORS[index]}")
+
+    def quoting_policy_changed(self, index) -> None:
+        self.quoting = QUOTING_POLICY[index]
+        self.logger.debug(f"Quoting policy changed to: {QUOTING_POLICY[index]}")
+
+    def quote_char_changed(self, text) -> None:
+        self.quotechar = text
+        self.logger.debug(f"Quote character changed to: {repr(text)}")
+
+    def update_file(
+        self, file: str, update: Callable[[str], None] | None = None
+    ) -> None:
+        self.file = file
+        if update:
+            update(file)
+        self.logger.debug(f"Input file set to: {file}")
 
 
 class RunParameters:
@@ -212,11 +267,14 @@ Parameters for the run of the program.
     env: EnvironmentParameters = EnvironmentParameters()
     log: LoggingParameters = LoggingParameters()
     prof: ProfilingParameters = ProfilingParameters()
-    read: IOParameters = IOParameters()
-    write: IOParameters = IOParameters()
+    read: IOParameters = IOParameters(LOGGER, "Read")
+    write: IOParameters = IOParameters(LOGGER, "Write")
+    format: OutFormat = "JSON"
+    out_dir: str = os.getcwd()
 
 
 PARAMS = RunParameters()
+PARAMS.write.file = "bouzyges_output.csv"
 
 ## Logic constants
 ### MRCM
@@ -521,6 +579,20 @@ Convert a SemanticPortrait to a SNOMED CT Post-Coordinated Expression
             + ":" * bool(attributes)
             + attributes
         )
+
+
+class WrappedResult:
+    """\
+Represents a completed semantic portrait with additional metadata.
+"""
+
+    def __init__(
+        self,
+        portrait: SemanticPortrait,
+        name_map: Mapping[SCTID, SCTDescription],
+    ) -> None:
+        self.portrait: SemanticPortrait = portrait
+        self.name_map: Mapping[SCTID, SCTDescription] = name_map
 
 
 ## Exceptions
@@ -2253,6 +2325,9 @@ class TestFileReader(unittest.TestCase):
             set(portrait.context),  # type: ignore
             {"Test context", "Another context"},
         )
+        self.assertEqual(
+            portrait.metadata, frozendict(vocab="ICD-42", code="123456")
+        )
 
 
 class FileWriter:
@@ -2260,14 +2335,33 @@ class FileWriter:
 A class to write resulting files.
 """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, format: OutFormat = "SCG") -> None:
         self.logger = LOGGER.getChild(self.__class__.__name__)
         self.path = path
-        self.content: pd.DataFrame | None = None
+        self.content: pd.DataFrame | Json | None = None
 
-    def _write(self) -> None:
+        self.write_chosen: Callable[[Iterable[WrappedResult]], None]
+        match format:
+            case "SCG":
+                self.write_chosen = self.to_snomed_compositional_grammar
+            case "CRS":
+                self.write_chosen = self.to_concept_relationship_stage
+            case "JSON":
+                self.write_chosen = self.to_json
+            case _:
+                raise NotImplementedError
+
+    @staticmethod
+    def get_formats() -> list[OutFormat]:
+        return ["SCG", "CRS", "JSON"]
+
+    def _write_csv(self) -> None:
         if self.content is None:
             raise BouzygesError("No content to write")
+
+        if not isinstance(self.content, pd.DataFrame):
+            raise BouzygesError("Content is not a DataFrame")
+
         self.logger.debug("Content ready")
 
         self.logger.info(f"Writing to {self.path}")
@@ -2282,7 +2376,9 @@ A class to write resulting files.
 
         self.logger.info(f"Written to {self.path}")
 
-    def to_scg(self, portraits: Iterable[SemanticPortrait]) -> None:
+    def to_snomed_compositional_grammar(
+        self, results: Iterable[WrappedResult]
+    ) -> None:
         """\
 Write the results of term evaluation as a table of SNOMED CT Post-Coordinated
 Expressions.
@@ -2293,20 +2389,24 @@ are not formally defined.
 """
         self.logger.debug("Writing to SCG format")
         dicts = []
-        for portrait in portraits:
+        for result in results:
+            portrait, map = result.portrait, result.name_map
             row = {}
             row["term"] = portrait.source_term
             row.update(portrait.attributes)
             row["scg"] = portrait.to_scg()
             dicts.append(row)
-            row["ancestors"] = (
-                f"[{','.join(map(str, portrait.ancestor_anchors))}]"
+            row["ancestors"] = json.dumps(
+                [
+                    {"conceptId": k, "pt": map.get(k, "Unknown")}
+                    for k in portrait.ancestor_anchors
+                ]
             )
-        self.content = pd.DataFrame(dicts)
-        self._write()
+            self.content = pd.DataFrame(dicts)
+        self._write_csv()
 
     def to_concept_relationship_stage(
-        self, portraits: Iterable[SemanticPortrait]
+        self, results: Iterable[WrappedResult]
     ) -> None:
         """\
 Write the results of term evaluation as a table in format of of OMOP CDM
@@ -2323,7 +2423,8 @@ other constraints.
         self.logger.debug("Writing to CONCEPT_RELATIONSHIP_STAGE format")
         dicts = []
         today = datetime.date.today().strftime("%Y-%m-%d")
-        for portrait in portraits:
+        for result in results:
+            portrait = result.portrait
             if not portrait.ancestor_anchors:
                 self.logger.warning(
                     f"No ancestors found for {portrait.source_term}"
@@ -2350,7 +2451,63 @@ other constraints.
                 }
                 dicts.append(row)
         self.content = pd.DataFrame(dicts)
-        self._write()
+        self._write_csv()
+
+    def to_json(self, results: Iterable[WrappedResult]) -> None:
+        """\
+Write the results of term evaluation as a JSON file.
+
+JSON schema:
+    {
+        "items": [
+            {
+                "term": "Pyogenic abscess of liver",
+                "attributes": [
+                    {
+                        "attribute": 363698007,
+                        "value": 10200004
+                    },
+                    ...
+                ],
+                "proximal_ancestors": [
+                    {
+                        "conceptId": 64572001,
+                        "pt": "Disease"
+                    },
+                    ...
+                ],
+                "scg": "<<<64572001:363698007=10200004",
+                "metadata": { ... }
+            },
+            ...
+        ]
+    }
+"""
+        self.logger.debug("Writing to JSON format")
+        dicts = []
+        for result in results:
+            portrait = result.portrait
+            map = result.name_map
+            row = {
+                "term": portrait.source_term,
+                "attributes": [
+                    {"attribute": k, "value": v}
+                    for k, v in portrait.attributes.items()
+                ],
+                "proximal_ancestors": [
+                    {"conceptId": k, "pt": map.get(k, "Unknown")}
+                    for k in portrait.ancestor_anchors
+                ],
+                "scg": portrait.to_scg(),
+                "metadata": dict(portrait.metadata),
+            }
+            dicts.append(row)
+        self.content = {"items": dicts}
+        self.logger.debug("Content ready")
+
+        with open(self.path, "w") as f:
+            json.dump(self.content, f, indent=2)
+        self.logger.info(f"Written to {self.path}")
 
 
 # Main logic host
@@ -2456,24 +2613,28 @@ Main logic host for the Bouzyges system.
         ]
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
-            results: Iterable[dict[SCTID, SCTDescription]] = executor.map(
+            results: Iterable[WrappedResult] = executor.map(
                 lambda w: w.run(), workers
             )
 
         self.logger.info("Routine finished")
         self.logger.info(
-            f"Time taken (s): {(datetime.datetime.now() - start_time).total_seconds()}"
+            f"Time taken (s): "
+            f"{(datetime.datetime.now() - start_time).total_seconds()}"
         )
 
         self.output(results)
 
-    def output(self, results: Iterable[dict[SCTID, SCTDescription]]):
-        # TODO: write to file
-        print("Results:")
-        for term, result in zip(self.portraits, results):
-            print(f" - {term}:")
-            for sctid, term in result.items():
-                print(f"    - {sctid} {term}")
+    def output(self, results: Iterable[WrappedResult]) -> None:
+        """\
+Output the results of the Bouzyges system.
+"""
+        if PARAMS.write.file is None:
+            raise BouzygesError("No output file specified")
+
+        out_path = os.path.join(PARAMS.out_dir, PARAMS.write.file)
+        writer = FileWriter(out_path, format=PARAMS.format)
+        writer.write_chosen(results)
 
     def run(self):
         """\
@@ -2512,7 +2673,7 @@ source term.
 
         self.logger.info(f"Worker {idx} for '{self.source_term}' is ready")
 
-    def run(self) -> dict[SCTID, SCTDescription]:
+    def run(self) -> WrappedResult:
         start_time = datetime.datetime.now()
         self.logger.info(f"Started at: {start_time}")
 
@@ -2554,7 +2715,7 @@ source term.
             f"{(datetime.datetime.now() - start_time).total_seconds()}"
         )
 
-        return anchors
+        return WrappedResult(self.portrait, anchors)
 
     def initialize_supertypes(self):
         """\
@@ -2914,45 +3075,46 @@ Main window and start config for the Bouzyges system.
         input_select = QtWidgets.QPushButton("Select")
         input_select.clicked.connect(self.select_input)
         input_contents.addWidget(input_select)
-        input_options = QtWidgets.QHBoxLayout()
-        separator = QtWidgets.QComboBox()
-        separator.addItems(map(lambda s: "Separator: " + s, SEPARATORS))
-        separator.currentIndexChanged.connect(self.separator_changed)
-        input_options.addWidget(separator)
-        quoting_policy = QtWidgets.QComboBox()
-        quoting_policy.addItems(QUOTING_POLICY)
-        quoting_policy.currentIndexChanged.connect(self.quoting_policy_changed)
-        input_options.addWidget(quoting_policy)
-        qchar_label = QtWidgets.QLabel("Quote character:")
-        input_options.addWidget(qchar_label)
-        quote_char = QtWidgets.QLineEdit()
-        quote_char.setPlaceholderText("Quote character")
-        quote_char.setText('"')
-        quote_char.setMaximumWidth(30)
-        quote_char.textChanged.connect(self.quote_char_changed)
-        input_options.addWidget(quote_char)
-        spacer = QtWidgets.QSpacerItem(
-            40,
-            20,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Minimum,
-        )
-        input_options.addItem(spacer)
         input_layout.addLayout(input_contents)
-        input_layout.addLayout(input_options)
+        input_layout.addLayout(PARAMS.read.layout)
 
-        # Output directory selection
+        # Output selection
         output_layout = QtWidgets.QVBoxLayout()
-        output_subtitle = QtWidgets.QLabel("Output directory")
+        output_subtitle = QtWidgets.QLabel("Output")
         output_subtitle.setStyleSheet("font-weight: bold;")
         output_layout.addWidget(output_subtitle)
-        output_contents = QtWidgets.QHBoxLayout()
+        out_dir_contents = QtWidgets.QHBoxLayout()
+        out_dir_label = QtWidgets.QLabel("Output directory:")
+        out_dir_contents.addWidget(out_dir_label)
         self.output_dir = QtWidgets.QLineEdit()
-        output_contents.addWidget(self.output_dir)
+        self.output_dir.setPlaceholderText("Select output directory")
+        self.output_dir.setText(os.getcwd())
+        self.output_dir.setReadOnly(True)
+        out_dir_contents.addWidget(self.output_dir)
         output_select = QtWidgets.QPushButton("Select")
         output_select.clicked.connect(self.select_output)
-        output_contents.addWidget(output_select)
-        output_layout.addLayout(output_contents)
+        out_dir_contents.addWidget(output_select)
+
+        out_file_contents = QtWidgets.QHBoxLayout()
+        out_file_label = QtWidgets.QLabel("File name:")
+        out_file_contents.addWidget(out_file_label)
+        output_filename = QtWidgets.QLineEdit()
+        output_filename.setPlaceholderText("Output file name")
+        output_filename.setText(PARAMS.write.file)
+        output_filename.textChanged.connect(PARAMS.write.update_file)
+        out_file_contents.addWidget(output_filename)
+        out_format_label = QtWidgets.QLabel("Format:")
+        out_file_contents.addWidget(out_format_label)
+        out_format_select = QtWidgets.QComboBox()
+        out_format_select.addItems(FileWriter.get_formats())
+        out_format_select.setCurrentIndex(
+            FileWriter.get_formats().index(PARAMS.format)
+        )
+        out_format_select.currentIndexChanged.connect(self.format_changed)
+        out_file_contents.addWidget(out_format_select)
+
+        output_layout.addLayout(out_dir_contents)
+        output_layout.addLayout(out_file_contents)
 
         # Run button
         run_layout = QtWidgets.QHBoxLayout()
@@ -2972,15 +3134,17 @@ Main window and start config for the Bouzyges system.
         layout.addItem(self._verticalSpacer)
         layout.addLayout(run_layout)
 
+    def format_changed(self, idx: int) -> None:
+        PARAMS.format = FileWriter.get_formats()[idx]
+        self.logger.info(f"Output format changed to {PARAMS.format}")
+
     def select_input(self):
         file = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Select input CSV file",
         )
         if file:
-            self.input_file.setText(file[0])
-            PARAMS.read.file = file[0]
-            self.logger.debug(f"Input file set to: {file[0]}")
+            PARAMS.read.update_file(file[0], self.input_file.setText)
 
     def select_output(self):
         dir = QtWidgets.QFileDialog.getExistingDirectory(
@@ -2989,6 +3153,8 @@ Main window and start config for the Bouzyges system.
         )
         if dir:
             self.output_dir.setText(dir)
+            PARAMS.out_dir = dir
+            self.logger.info(f"Output directory changed to {dir}")
 
     def select_cache_db(self):
         file = QtWidgets.QFileDialog.getOpenFileName(
@@ -3041,18 +3207,6 @@ Main window and start config for the Bouzyges system.
         self.logger.info(f"{name} thread finished")
         self._bouzyges_subthread.join()
         self._bouzyges_subthread = None
-
-    def separator_changed(self, index) -> None:
-        PARAMS.read.sep = SEPARATORS[index]
-        self.logger.debug(f"Separator changed to: {SEPARATORS[index]}")
-
-    def quoting_policy_changed(self, index) -> None:
-        PARAMS.read.quoting = QUOTING_POLICY[index]
-        self.logger.debug(f"Quoting policy changed to: {QUOTING_POLICY[index]}")
-
-    def quote_char_changed(self, text) -> None:
-        PARAMS.read.quotechar = text
-        self.logger.debug(f"Quote character changed to: {text}")
 
     def stop_bouzyges(self) -> None:
         if self._bouzyges_subthread:
@@ -3233,7 +3387,6 @@ Main window and start config for the Bouzyges system.
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
     window = BouzygesWindow()
     window.show()
     sys.exit(app.exec())
