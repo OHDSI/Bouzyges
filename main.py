@@ -772,13 +772,16 @@ Abstract class for formatting prompts for the LLM agent.
 """
 
     ROLE = (
-        "a domain expert in clinical terminology who is helping to build a "
-        "semantic portrait of a concept in a clinical terminology system"
+        "a domain expert system in clinical terminology who is helping to "
+        "build a semantic representation of a concept in a clinical ontology "
+        "by providing information about the concept's relationships to other "
+        "concepts in the ontology"
     )
     TASK = (
         "to provide information about the given term supertypes, "
         "attributes, attribute values, and other relevant information as "
-        "requested"
+        "requested, inferring them only from the term meaning and the provided "
+        "context"
     )
 
     REQUIREMENTS = (
@@ -786,36 +789,32 @@ Abstract class for formatting prompts for the LLM agent.
         "it is critically important that you provide answer in a "
         "format that is requested by the system, as answers will "
         "be parsed by a machine. Your answer should ALWAYS end with a line "
-        "that says 'The answer is ' and the chosen option"
+        "that says 'The answer is ' and the chosen option. This is the second "
+        "time you are being asked the question, as the first time you failed "
+        "to adhere to the format. Please make sure to follow the instructions."
     )
     INSTRUCTIONS = (
-        "Options that speculate about details NOT EXPLICITLY INCLUDED in the"
+        "Options that speculate about details not explicitly included in the"
         "term meaning are to be avoided, e.g. term 'operation on abdominal "
         "region' should NOT be assumed to be a laparoscopic operation, as "
-        "access method is not specified in the term. It is encouraged to "
+        "access method is not specified in the term. It absolutely required to "
         "explain your reasoning when providing answers. The automated system "
         "will look for the last answer surrounded by square brackets, e.g. "
         "[answer], so only one of the options should be selected and returned "
         "in this format. If the question looks like 'What is the topography of "
         "the pulmonary tuberculosis?', and the options are [Lung structure], "
-        "[Heart structure], [Kidney structure], the good answer would look "
-        "like 'As the term 'pulmonary' refers to a disease of the lungs, "
-        "the topography should be [Lung structure].' If you are not sure about "
-        "the answer, you are encouraged to think aloud, analyzing the options."
+        "[Heart structure], [Kidney structure], the good answer would end with"
+        "[Lung structure].' Answers that do not include reasoning are "
+        "unacceptable."
     )
 
     ESCAPE_INSTRUCTIONS = (
-        " If all provided options are incorrect, or imply extra information "
-        "not present EXPLICITLY AND UNAMBIGUOUSLY in the term, you must explain "
-        "why each option is incorrect, and finalize the answer with the word "
-        f"{EscapeHatch.WORD}."
+        f" If all provided options are incorrect, or imply extra information "
+        f"not present explicitly and unambiguously in the term, you must "
+        f"explain why each option is incorrect, and finalize the answer with "
+        f"the word {EscapeHatch.WORD}. However, if any of the offered terms "
+        f"matches the question, you must select it."
     )
-
-    ROLE: str
-    TASK: str
-    REQUIREMENTS: str
-    INSTRUCTIONS: str
-    ESCAPE_INSTRUCTIONS: str
 
     @staticmethod
     def wrap_term(term: str) -> str:
@@ -1026,7 +1025,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
 
     default_api_options = frozendict(
         # We want responses to use tokens we provide
-        presence_penalty=-0.5,
+        presence_penalty=-0.25,
         # max_tokens=1024,
         timeout=15,
     )
@@ -1065,10 +1064,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
             ),
             (
                 "system",
-                "Your exact instructions are:",
-            ),
-            (
-                "system",
+                "Your exact instructions are:\n",
                 self.INSTRUCTIONS + (allow_escape * self.ESCAPE_INSTRUCTIONS),
             ),
         ]
@@ -3044,8 +3040,24 @@ Main window and start config for the Bouzyges system.
         self.options_container.setLayout(options_layout)
 
         # Input and output
+        right_quarter_layout = QtWidgets.QVBoxLayout()
+        self.io_container = QtWidgets.QWidget()
         io_layout = QtWidgets.QVBoxLayout()
         self.__populate_io_layout(io_layout)
+        self.io_container.setLayout(io_layout)
+        right_quarter_layout.addWidget(self.io_container)
+
+        # Run and stop button
+        run_layout = QtWidgets.QHBoxLayout()
+        self.run_button = QtWidgets.QPushButton("Run")
+        self.run_button.clicked.connect(self.spin_bouzyges)
+        run_layout.addWidget(self.run_button)
+
+        self.stop_button = QtWidgets.QPushButton("Stop and quit")
+        self.stop_button.clicked.connect(self.stop_bouzyges)
+        self.stop_button.setEnabled(False)
+        run_layout.addWidget(self.stop_button)
+        right_quarter_layout.addLayout(run_layout)
 
         # Logging space
         logging_layout = QtWidgets.QVBoxLayout()
@@ -3062,7 +3074,7 @@ Main window and start config for the Bouzyges system.
 
         top_half_layout = QtWidgets.QHBoxLayout()
         top_half_layout.addWidget(self.options_container)
-        top_half_layout.addLayout(io_layout)
+        top_half_layout.addLayout(right_quarter_layout)
 
         layout.addLayout(top_half_layout)
         layout.addLayout(logging_layout)
@@ -3127,23 +3139,10 @@ Main window and start config for the Bouzyges system.
         output_layout.addLayout(out_file_contents)
         output_layout.addLayout(PARAMS.write.layout)
 
-        # Run button
-        run_layout = QtWidgets.QHBoxLayout()
-        self.run_button = QtWidgets.QPushButton("Run")
-        self.run_button.clicked.connect(self.spin_bouzyges)
-        run_layout.addWidget(self.run_button)
-
-        # Stop button
-        self.stop_button = QtWidgets.QPushButton("Stop and quit")
-        self.stop_button.clicked.connect(self.stop_bouzyges)
-        self.stop_button.setEnabled(False)
-        run_layout.addWidget(self.stop_button)
-
         layout.addLayout(input_layout)
         layout.addItem(self._verticalSpacer)
         layout.addLayout(output_layout)
         layout.addItem(self._verticalSpacer)
-        layout.addLayout(run_layout)
 
     def format_changed(self, idx: int) -> None:
         PARAMS.format = FileWriter.get_formats()[idx]
@@ -3193,14 +3192,29 @@ Main window and start config for the Bouzyges system.
                 logger=LOGGER,
             )
 
-        self.__start_subthread("Bouzyges Preparation", get_bouzyges)
-        bouzyges = bouzyges_capture["success"]
-
         self.options_container.setEnabled(False)
+        self.io_container.setEnabled(False)
         self.run_button.setEnabled(False)
         self.stop_button.setEnabled(True)
 
+        self.__start_subthread("Bouzyges Preparation", get_bouzyges)
+
+        if not bouzyges_capture.get("success"):
+            self.logger.error(
+                "Could not prepare Bouzyges. Check the configuration."
+            )
+            self.reset_ui()
+            return
+        bouzyges = bouzyges_capture["success"]
+
         self.__start_subthread("Bouzyges Run", bouzyges.run)
+        self.reset_ui()
+
+    def reset_ui(self) -> None:
+        self.options_container.setEnabled(True)
+        self.io_container.setEnabled(True)
+        self.run_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
 
     def __start_subthread(self, name: str, target: Callable, *args, **kwargs):
         if self._bouzyges_subthread:
