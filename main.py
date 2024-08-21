@@ -17,7 +17,15 @@ import threading
 import unittest
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Iterable, Literal, Mapping, Self, TypeVar
+from typing import (
+    Callable,
+    Iterable,
+    Literal,
+    Mapping,
+    Self,
+    TypeAlias,
+    TypeVar,
+)
 
 import openai
 import requests
@@ -103,12 +111,12 @@ Boolean answer constants for prompters for yes/no questions
         return cls.YES if value else cls.NO
 
 
-PrompterOption = Literal["human", "openai", "azure"]
-JsonPrimitive = int | float | str | bool | None
-Json = dict[str, "Json"] | list["Json"] | JsonPrimitive
-OpenAIPromptRole = Literal["user", "system", "assisstant"]
-OpenAIMessages = tuple[frozendict[OpenAIPromptRole, str]]
-OutFormat = Literal["SCG", "CRS", "JSON"]
+PrompterOption: TypeAlias = Literal["human", "openai", "azure"]
+JsonPrimitive: TypeAlias = int | float | str | bool | None
+Json: TypeAlias = dict[str, "Json"] | list["Json"] | JsonPrimitive
+OpenAIPromptRole: TypeAlias = Literal["user", "system", "assisstant"]
+OpenAIMessages: TypeAlias = tuple[frozendict[OpenAIPromptRole, str]]
+OutFormat: TypeAlias = Literal["SCG", "CRS", "JSON"]
 T = TypeVar("T")
 
 ## Logging
@@ -142,11 +150,11 @@ AVAILABLE_PROMPTERS: dict[PrompterOption, str] = {
 }
 SEPARATORS: list[str] = [",", ";", "Tab"]
 QUOTECHARS: list[str] = ['"', "'"]
-QUOTING_POLICY: dict[str, int] = {
-    "Quote minimal": csv.QUOTE_MINIMAL,
-    "Quote all": csv.QUOTE_ALL,
-    "Quote string": csv.QUOTE_NONNUMERIC,
-    "No quoting": csv.QUOTE_NONE,
+QUOTING_POLICY: dict[int, str] = {
+    csv.QUOTE_MINIMAL: "Quote minimal",
+    csv.QUOTE_ALL: "Quote all",
+    csv.QUOTE_NONNUMERIC: "Quote string",
+    csv.QUOTE_NONE: "No quoting",
 }
 
 
@@ -202,14 +210,13 @@ class IOParameters:
 Parameters for reading and writing file data.
 """
 
-    file: str | None = None
     sep: str = "Tab"
     quotechar: str = '"'
-    quoting: int = csv.QUOTE_ALL
 
-    def __init__(self, parent_logger: logging.Logger, name: str) -> None:
+    def __init__(self, file: str, name: str) -> None:
         self._populate_layout()
-        self.logger = parent_logger.getChild(name)
+        self.file = file
+        self.logger = LOGGER.getChild(name)
 
     def _populate_layout(self) -> None:
         self.layout = QtWidgets.QHBoxLayout()
@@ -218,7 +225,7 @@ Parameters for reading and writing file data.
         separator.currentIndexChanged.connect(self.separator_changed)
         self.layout.addWidget(separator)
         quoting_policy = QtWidgets.QComboBox()
-        quoting_policy.addItems(QUOTING_POLICY)
+        quoting_policy.addItems(QUOTING_POLICY.values())
         quoting_policy.currentIndexChanged.connect(self.quoting_policy_changed)
         self.layout.addWidget(quoting_policy)
         qchar_label = QtWidgets.QLabel("Quote character:")
@@ -242,8 +249,11 @@ Parameters for reading and writing file data.
         self.logger.debug(f"Separator changed to: {SEPARATORS[index]}")
 
     def quoting_policy_changed(self, index) -> None:
-        self.quoting = QUOTING_POLICY[index]
-        self.logger.debug(f"Quoting policy changed to: {QUOTING_POLICY[index]}")
+        self.quoting = list(QUOTING_POLICY)[index]
+        self.logger.debug(
+            f"Quoting policy changed to: {self.quoting}:"
+            f"{QUOTING_POLICY[self.quoting]}"
+        )
 
     def quote_char_changed(self, text) -> None:
         self.quotechar = text
@@ -267,14 +277,13 @@ Parameters for the run of the program.
     env: EnvironmentParameters = EnvironmentParameters()
     log: LoggingParameters = LoggingParameters()
     prof: ProfilingParameters = ProfilingParameters()
-    read: IOParameters = IOParameters(LOGGER, "Read")
-    write: IOParameters = IOParameters(LOGGER, "Write")
+    read: IOParameters = IOParameters("Test.csv", "Read")
+    write: IOParameters = IOParameters("bouzyges_output.csv", "Write")
     format: OutFormat = "JSON"
     out_dir: str = os.getcwd()
 
 
 PARAMS = RunParameters()
-PARAMS.write.file = "bouzyges_output.csv"
 
 ## Logic constants
 ### MRCM
@@ -3070,6 +3079,7 @@ Main window and start config for the Bouzyges system.
         input_contents = QtWidgets.QHBoxLayout()
         self.input_file = QtWidgets.QLineEdit()
         self.input_file.setPlaceholderText("Select input CSV file")
+        self.input_file.setText(PARAMS.read.file)
         self.input_file.setReadOnly(True)
         input_contents.addWidget(self.input_file)
         input_select = QtWidgets.QPushButton("Select")
@@ -3080,7 +3090,7 @@ Main window and start config for the Bouzyges system.
 
         # Output selection
         output_layout = QtWidgets.QVBoxLayout()
-        output_subtitle = QtWidgets.QLabel("Output")
+        output_subtitle = QtWidgets.QLabel("Output file")
         output_subtitle.setStyleSheet("font-weight: bold;")
         output_layout.addWidget(output_subtitle)
         out_dir_contents = QtWidgets.QHBoxLayout()
@@ -3115,6 +3125,7 @@ Main window and start config for the Bouzyges system.
 
         output_layout.addLayout(out_dir_contents)
         output_layout.addLayout(out_file_contents)
+        output_layout.addLayout(PARAMS.write.layout)
 
         # Run button
         run_layout = QtWidgets.QHBoxLayout()
@@ -3291,7 +3302,7 @@ Main window and start config for the Bouzyges system.
         profiling_layout.addWidget(profiling_checkbox)
 
         early_termination_layout = QtWidgets.QVBoxLayout()
-        early_termination_label = QtWidgets.QLabel("Stop execution after:")
+        early_termination_label = QtWidgets.QLabel("Stop execution after(s):")
         early_termination_input = QtWidgets.QLineEdit()
         early_termination_input.setPlaceholderText("Do not stop")
         if PARAMS.prof.stop_profiling_after_seconds is not None:
