@@ -223,6 +223,7 @@ Parameters for reading and writing file data.
         self.layout = QtWidgets.QHBoxLayout()
         separator = QtWidgets.QComboBox()
         separator.addItems(map(lambda s: "Separator: " + s, SEPARATORS))
+        separator.setCurrentIndex(2)
         separator.currentIndexChanged.connect(self.separator_changed)
         self.layout.addWidget(separator)
         quoting_policy = QtWidgets.QComboBox()
@@ -1067,8 +1068,9 @@ Outputs prompts as JSONs and contains sensible API option defaults.
             ),
             (
                 "system",
-                "Your exact instructions are:\n",
-                self.INSTRUCTIONS + (allow_escape * self.ESCAPE_INSTRUCTIONS),
+                "Your exact instructions are:\n"
+                + self.INSTRUCTIONS
+                + (allow_escape * self.ESCAPE_INSTRUCTIONS),
             ),
         ]
         return prompt
