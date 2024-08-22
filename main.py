@@ -161,8 +161,8 @@ class ProfilingParameters(pydantic.BaseModel):
 Parameters to control profiling of the program.
 """
 
-    enabled: bool = True
-    stop_profiling_after_seconds: int | None = None
+    enabled: bool
+    stop_profiling_after_seconds: int | None
 
 
 class LoggingParameters(pydantic.BaseModel):
@@ -170,8 +170,8 @@ class LoggingParameters(pydantic.BaseModel):
 Parameters to control logging.
 """
 
-    log_to_file: bool = True
-    logging_level: int = logging.INFO
+    log_to_file: bool
+    logging_level: int
 
     def update(self, level):
         self.logging_level = level
@@ -183,10 +183,10 @@ class APIParameters(pydantic.BaseModel):
 Parameters to control the interface to Snowstorm, cache and LLMs.
 """
 
-    prompter: PrompterOption = "openai"
-    snowstorm_url: Url = Url("http://localhost:8080/")
-    llm_model_id: str = DEFAULT_MODEL
-    cache_db: str | None = "prompt_cache.db"
+    prompter: PrompterOption
+    snowstorm_url: Url
+    llm_model_id: str
+    cache_db: str | None
 
 
 class EnvironmentParameters(pydantic.BaseModel):
@@ -194,9 +194,14 @@ class EnvironmentParameters(pydantic.BaseModel):
 Parameters that reflect the environment variables.
 """
 
-    openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
-    azure_api_key: str | None = os.getenv("AZURE_OPENAI_API_KEY")
-    azure_api_endpoint: str | None = os.getenv("AZURE_OPENAI_ENDPOINT")
+    openai_api_key: str | None = None
+    azure_api_key: str | None = None
+    azure_api_endpoint: str | None = None
+
+    def fill_from_env(self) -> None:
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
+        self.azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
+        self.azure_api_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
 
 
 class IOParameters(pydantic.BaseModel):
@@ -205,9 +210,9 @@ Parameters for reading and writing CSV file data.
 """
 
     file: str
-    sep: str = "Tab"
-    quotechar: str = '"'
-    quoting: int = csv.QUOTE_MINIMAL
+    sep: str
+    quotechar: str
+    quoting: int
 
 
 class IOParametersWidget(QtWidgets.QWidget):
@@ -218,27 +223,25 @@ class IOParametersWidget(QtWidgets.QWidget):
         self.logger = LOGGER.getChild(name)
         self.parameters: IOParameters = par
         self._populate_layout()
+        self._set_values()
 
     def _populate_layout(self) -> None:
         layout = QtWidgets.QHBoxLayout()
-        separator = QtWidgets.QComboBox()
-        separator.addItems(map(lambda s: "Separator: " + s, SEPARATORS))
-        separator.setCurrentIndex(2)
-        separator.currentIndexChanged.connect(self.separator_changed)
-        layout.addWidget(separator)
-        quoting_policy = QtWidgets.QComboBox()
-        quoting_policy.addItems(QUOTING_POLICY.values())
-        quoting_policy.currentIndexChanged.connect(self.quoting_policy_changed)
-        layout.addWidget(quoting_policy)
+        self.sep_cb = QtWidgets.QComboBox()
+        self.sep_cb.addItems(map(lambda s: "Separator: " + s, SEPARATORS))
+        self.sep_cb.currentIndexChanged.connect(self.separator_changed)
+        layout.addWidget(self.sep_cb)
+        self.quoting_cb = QtWidgets.QComboBox()
+        self.quoting_cb.addItems(QUOTING_POLICY.values())
+        self.quoting_cb.currentIndexChanged.connect(self.quoting_policy_changed)
+        layout.addWidget(self.quoting_cb)
         qchar_label = QtWidgets.QLabel("Quote character:")
         layout.addWidget(qchar_label)
-        self.quotechar = QtWidgets.QLineEdit()
-        self.quotechar.setPlaceholderText('"')
-        self.quotechar.setText('"')
-        self.quotechar.setMaximumWidth(30)
-        self.quotechar.textChanged.connect(self.quote_char_changed)
-        self.quotechar.setEnabled(self.parameters.quoting != csv.QUOTE_NONE)
-        layout.addWidget(self.quotechar)
+        self.qc_edit = QtWidgets.QLineEdit()
+        self.qc_edit.setPlaceholderText('"')
+        self.qc_edit.setMaximumWidth(30)
+        self.qc_edit.textChanged.connect(self.quote_char_changed)
+        layout.addWidget(self.qc_edit)
         spacer = QtWidgets.QSpacerItem(
             40,
             20,
@@ -249,28 +252,36 @@ class IOParametersWidget(QtWidgets.QWidget):
         self.setLayout(layout)
 
     def separator_changed(self, index) -> None:
-        self.sep = SEPARATORS[index]
+        self.parameters.sep = SEPARATORS[index]
         self.logger.debug(f"Separator changed to: {SEPARATORS[index]}")
 
     def quoting_policy_changed(self, index) -> None:
-        self.quoting = list(QUOTING_POLICY)[index]
+        self.parameters.quoting = list(QUOTING_POLICY)[index]
         self.logger.debug(
-            f"Quoting policy changed to: {self.quoting}:"
-            f"{QUOTING_POLICY[self.quoting]}"
+            f"Quoting policy changed to: {self.parameters.quoting}:"
+            f"{QUOTING_POLICY[self.parameters.quoting]}"
         )
-        self.quotechar.setEnabled(self.quoting != csv.QUOTE_NONE)
+        self.qc_edit.setEnabled(self.parameters.quoting != csv.QUOTE_NONE)
 
     def quote_char_changed(self, text) -> None:
-        self.quotechar = text
+        self.parameters.quotechar = text
         self.logger.debug(f"Quote character changed to: {repr(text)}")
 
     def update_file(
         self, file: str, update: Callable[[str], None] | None = None
     ) -> None:
-        self.file = file
+        self.parameters.file = file
         if update:
             update(file)
         self.logger.debug(f"Input file set to: {file}")
+
+    def _set_values(self) -> None:
+        self.sep_cb.setCurrentIndex(SEPARATORS.index(self.parameters.sep))
+        self.quoting_cb.setCurrentIndex(
+            list(QUOTING_POLICY).index(self.parameters.quoting)
+        )
+        self.qc_edit.setText(self.parameters.quotechar)
+        self.qc_edit.setEnabled(self.parameters.quoting != csv.QUOTE_NONE)
 
 
 class RunParameters(pydantic.BaseModel):
@@ -278,18 +289,38 @@ class RunParameters(pydantic.BaseModel):
 Parameters for the run of the program.
 """
 
-    api: APIParameters = APIParameters()
-    env: EnvironmentParameters = EnvironmentParameters()
-    log: LoggingParameters = LoggingParameters()
-    prof: ProfilingParameters = ProfilingParameters()
-    read: IOParameters = IOParameters(file="Test.csv")
-    write: IOParameters = IOParameters(file="bouzyges_output.csv")
-    format: OutFormat = "JSON"
-    out_dir: str = os.getcwd()
+    api: APIParameters
+    env: EnvironmentParameters = pydantic.Field(
+        exclude=True, default_factory=EnvironmentParameters
+    )
+    log: LoggingParameters
+    prof: ProfilingParameters
+    read: IOParameters
+    write: IOParameters
+    format: OutFormat
+    out_dir: str = pydantic.Field(default_factory=os.getcwd)
+
+    @classmethod
+    def from_file(cls, file: str) -> RunParameters:
+        with open(file, "r") as f:
+            json_data = json.load(f)
+        params = RunParameters(**json_data)
+        # Environment variables are not stored in JSON
+        params.env.fill_from_env()
+        return params
+
+    def update(self, json_data: dict) -> None:
+        self.__init__(**json_data)
+        self.log.update(self.log.logging_level)
+
+    def save(self, file: str) -> None:
+        with open(file, "w") as f:
+            json.dump(self.model_dump(), f, indent=2)
 
 
-PARAMS = RunParameters()
-LOGGER.info(f"Parameters loaded: {PARAMS.model_dump(mode='json')}")
+PARAMS = RunParameters.from_file("default_config.json")
+LOGGER.info(f"Parameters loaded: {json.dumps(PARAMS.model_dump(), indent=2)}")
+
 ## Logic constants
 ### MRCM
 MRCM_DOMAIN_REFERENCE_SET_ECL = ECLExpression("<<723589008")
@@ -2408,17 +2439,21 @@ are not formally defined.
         self.logger.debug("Writing to SCG format")
         dicts = []
         for result in results:
-            portrait, map = result.portrait, result.name_map
+            portrait, map_ = result.portrait, result.name_map
             row = {}
             row["term"] = portrait.source_term
             row.update(portrait.attributes)
             row["scg"] = portrait.to_scg()
             dicts.append(row)
-            row["ancestors"] = json.dumps(
+            row["ancestors_json"] = json.dumps(
                 [
-                    {"conceptId": k, "pt": map.get(k, "Unknown")}
+                    {"conceptId": k, "pt": map_.get(k, "Unknown")}
                     for k in portrait.ancestor_anchors
                 ]
+            )
+            row["ancestors_scg"] = "<<< " + " + ".join(
+                f"{k} |{map_.get(k, 'Unknown')}|"
+                for k in portrait.ancestor_anchors
             )
             self.content = pd.DataFrame(dicts)
         self._write_csv()

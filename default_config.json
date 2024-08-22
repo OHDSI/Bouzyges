@@ -1,0 +1,29 @@
+{
+  "api": {
+    "prompter": "openai",
+    "snowstorm_url": "http://localhost:8080/",
+    "llm_model_id": "gpt-4o-mini",
+    "cache_db": "prompt_cache.db"
+  },
+  "log": {
+    "log_to_file": true,
+    "logging_level": 20
+  },
+  "prof": {
+    "enabled": true,
+    "stop_profiling_after_seconds": null
+  },
+  "read": {
+    "file": "Test.csv",
+    "sep": "Tab",
+    "quotechar": "\"",
+    "quoting": 0
+  },
+  "write": {
+    "file": "bouzyges_output.csv",
+    "sep": "Tab",
+    "quotechar": "\"",
+    "quoting": 0
+  },
+  "format": "SCG"
+}
