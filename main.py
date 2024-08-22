@@ -15,7 +15,7 @@ import sys
 import threading
 import unittest
 from abc import ABC, abstractmethod
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import (
     Callable,
     Iterable,
@@ -696,6 +696,22 @@ Has option to store API parameters for the answer.
     escape_hatch: SCTDescription | None = None
     api_options: frozendict[str, JsonPrimitive] | None = None
 
+    def to_json(self) -> Json:
+        """Convert the prompt to a JSON-serializable format."""
+        if isinstance(self.prompt_message, str):
+            message = self.prompt_message
+        else:
+            message = [
+                {role: text for role, text in message.items()}
+                for message in self.prompt_message
+            ]
+        return {
+            "prompt": str(message),
+            "options": sorted(map(str, self.options)) if self.options else None,
+            "escape_hatch": str(self.escape_hatch),
+            "api_options": dict(self.api_options) if self.api_options else None,
+        }  # type:ignore
+
 
 # Logic classes
 ## Prompt cache interface
@@ -766,7 +782,8 @@ Get the answer from the cache for specified model.
             return None
         except (sqlite3.InterfaceError, sqlite3.DatabaseError):
             self.logger.warning(
-                f"Cache access failed for prompt: {json.dumps(asdict(prompt))}"
+                "Cache access failed for prompt: "
+                + f"{json.dumps(prompt.to_json())}"
             )
             return None
 
@@ -2669,7 +2686,7 @@ Main logic host for the Bouzyges system.
 
         with concurrent.futures.ThreadPoolExecutor() as executor:
             results: Iterable[WrappedResult] = executor.map(
-                lambda w: w.run(), workers
+                _BouzygesWorker.run, workers
             )
 
         self.logger.info("Routine finished")
@@ -2701,9 +2718,10 @@ Run the Bouzyges system.
                     self._run()
                 except ProfileMark:
                     pass
-            stats = pstats.Stats(prof)
-            stats.sort_stats(pstats.SortKey.TIME)
-            stats.dump_stats("stats.prof")
+                finally:
+                    stats = pstats.Stats(prof)
+                    stats.sort_stats(pstats.SortKey.TIME)
+                    stats.dump_stats("stats.prof")
         else:
             self._run()
         self.prompter.report_usage()
@@ -2721,17 +2739,37 @@ source term.
         self.source_term = portrait.source_term
         self.portrait = portrait
 
-        self.logger = bouzyges.logger.getChild(f"Worker {idx}:")
+        term_abbrev = "".join(
+            map(
+                lambda w: re.sub(r"\W", "", w)[0].upper(),
+                self.source_term.split(),
+            )
+        )
+        self.logger = bouzyges.logger.getChild(f"Worker {idx}:{term_abbrev}")
         self.snowstorm = bouzyges.snowstorm
         self.prompter = bouzyges.prompter
         self.mrcm_entries = bouzyges.mrcm_entries
 
-        self.logger.info(f"Worker {idx} for '{self.source_term}' is ready")
+        self.logger.info(f"Worker for '{self.source_term}' is ready")
 
     def run(self) -> WrappedResult:
+        """\
+Run the worker thread.
+"""
         start_time = datetime.datetime.now()
         self.logger.info(f"Started at: {start_time}")
+        try:
+            return self._run()
+        except Exception as e:
+            self.logger.error(f"An error occurred: {e}")
+            raise
+        finally:
+            self.logger.info(
+                f"Time taken (s): "
+                f"{(datetime.datetime.now() - start_time).total_seconds()}"
+            )
 
+    def _run(self) -> WrappedResult:
         self.initialize_supertypes()
         self.populate_attribute_candidates()
         self.populate_unchecked_attributes()
@@ -2763,12 +2801,6 @@ source term.
             ancestor = self.snowstorm.get_concept(anchor)
             self.logger.info(f" - {ancestor.sctid} {ancestor.pt}")
             anchors[ancestor.sctid] = ancestor.pt
-
-        self.logger.info(f"Started at: {start_time}")
-        self.logger.info(
-            f"Time taken (s): "
-            f"{(datetime.datetime.now() - start_time).total_seconds()}"
-        )
 
         return WrappedResult(self.portrait, anchors)
 
