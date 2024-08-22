@@ -112,6 +112,7 @@ Boolean answer constants for prompters for yes/no questions
 PrompterOption: TypeAlias = Literal["human", "openai", "azure"]
 JsonPrimitive: TypeAlias = int | float | str | bool | None
 Json: TypeAlias = dict[str, "Json"] | list["Json"] | JsonPrimitive
+JsonDict: TypeAlias = dict[str, Json]
 OpenAIPromptRole: TypeAlias = Literal["user", "system", "assisstant"]
 OpenAIMessages: TypeAlias = tuple[frozendict[OpenAIPromptRole, str]]
 OutFormat: TypeAlias = Literal["SCG", "CRS", "JSON"]
@@ -696,7 +697,7 @@ Has option to store API parameters for the answer.
     escape_hatch: SCTDescription | None = None
     api_options: frozendict[str, JsonPrimitive] | None = None
 
-    def to_json(self) -> Json:
+    def to_json(self) -> JsonDict:
         """Convert the prompt to a JSON-serializable format."""
         if isinstance(self.prompt_message, str):
             message = self.prompt_message
@@ -705,11 +706,17 @@ Has option to store API parameters for the answer.
                 {role: text for role, text in message.items()}
                 for message in self.prompt_message
             ]
+
+        if self.api_options:
+            api_options = {k: v for k, v in self.api_options}
+        else:
+            api_options = None
+
         return {
-            "prompt": str(message),
+            "prompt_text": json.dumps(message, sort_keys=True),
+            "prompt_is_json": not isinstance(self.prompt_message, str),
             "options": sorted(map(str, self.options)) if self.options else None,
-            "escape_hatch": str(self.escape_hatch),
-            "api_options": dict(self.api_options) if self.api_options else None,
+            "api_options": api_options,
         }  # type:ignore
 
 
@@ -724,6 +731,8 @@ tokens.
 """
 
     def __init__(self, db_connection: sqlite3.Connection):
+        # TODO: form an event queue for this; sqlite does not do well in
+        # multi-threaded environments
         self.connection = db_connection
         self.table_name = "prompt"
         self.logger = LOGGER.getChild("PromptCache")
@@ -743,39 +752,26 @@ tokens.
         """\
 Get the answer from the cache for specified model.
 """
+        prompt_dict = prompt.to_json()
+        options_are_none = prompt_dict["options"] is None
+        api_are_none = prompt_dict["api_options"] is None
+
         query = f"""
             SELECT response
             FROM {self.table_name}
             WHERE
                 model = ? AND
                 prompt_text = ? AND
+                options {'IS' if options_are_none else '=' } ? AND
                 prompt_is_json = ? AND
-                api_options
+                api_options {'IS' if api_are_none else '=' } ?
         """
 
-        # Shape the prompt text
-        if prompt.api_options:
-            api_options = json.dumps(
-                {
-                    key: prompt.api_options[key]
-                    for key in sorted(prompt.api_options)
-                }
-            )
-            query += " = ? ;"
-        else:
-            api_options = None
-            query += " is ? ;"
-
-        prompt_is_json = not isinstance(prompt.prompt_message, str)
-        prompt_text = json.dumps(prompt.prompt_message)
-
-        # TODO: form an event queue for this; sqlite does not do well in
-        # multi-threaded environments
         try:
             cursor = self.connection.cursor()
             cursor.execute(
                 query,
-                (model, prompt_text, prompt_is_json, api_options),
+                (model, *prompt_dict.values()),
             )
             if answer := cursor.fetchone():
                 return answer[0]
@@ -793,35 +789,20 @@ Remember the answer for the prompt for the specified model.
 """
         query = f"""
             INSERT INTO {self.table_name} (
-                model, prompt_text, prompt_is_json, response, api_options
+                model, prompt_text, prompt_is_json, api_options, response
             )
             VALUES (?, ?, ?, ?, ?)
         """
-        if prompt.api_options:
-            api_options = json.dumps(
-                {
-                    key: prompt.api_options[key]
-                    for key in sorted(prompt.api_options)
-                }
-            )
-        else:
-            api_options = None
+        # Convert prompt to serializable format
+        prompt_dict = prompt.to_json()
+
         cursor = self.connection.cursor()
-
-        # Shape the prompt text
-        if prompt_is_json := isinstance(prompt.prompt_message, tuple):
-            prompt_text = json.dumps(prompt.prompt_message)
-        else:
-            prompt_text = prompt.prompt_message
-
         cursor.execute(
             query,
             (
                 model,
-                prompt_text,
-                prompt_is_json,
+                *prompt_dict.values(),
                 response,
-                api_options,
             ),
         )
         self.connection.commit()
