@@ -31,6 +31,7 @@ import pandas as pd
 import pydantic
 import requests
 import tenacity
+import webbrowser
 from frozendict import frozendict
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -223,7 +224,7 @@ class IOParametersWidget(QtWidgets.QWidget):
         self.logger = LOGGER.getChild(name)
         self.parameters: IOParameters = par
         self._populate_layout()
-        self._set_values()
+        self.set_values()
 
     def _populate_layout(self) -> None:
         layout = QtWidgets.QHBoxLayout()
@@ -275,7 +276,7 @@ class IOParametersWidget(QtWidgets.QWidget):
             update(file)
         self.logger.debug(f"Input file set to: {file}")
 
-    def _set_values(self) -> None:
+    def set_values(self) -> None:
         self.sep_cb.setCurrentIndex(SEPARATORS.index(self.parameters.sep))
         self.quoting_cb.setCurrentIndex(
             list(QUOTING_POLICY).index(self.parameters.quoting)
@@ -3068,6 +3069,11 @@ Main window and start config for the Bouzyges system.
         widget.setLayout(layout)
         self.setCentralWidget(widget)
 
+        # Menu bar
+        menubar = self.menuBar()
+        if menubar is not None:
+            self.populate_menu(menubar)
+
     def populate_layout(self, layout):
         self._verticalSpacer = QtWidgets.QSpacerItem(
             20,
@@ -3103,16 +3109,11 @@ Main window and start config for the Bouzyges system.
         self.io_container.setLayout(io_layout)
         right_quarter_layout.addWidget(self.io_container)
 
-        # Run and stop button
+        # Run button
         run_layout = QtWidgets.QHBoxLayout()
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.spin_bouzyges)
         run_layout.addWidget(self.run_button)
-
-        self.stop_button = QtWidgets.QPushButton("Stop and quit")
-        self.stop_button.clicked.connect(self.stop_bouzyges)
-        self.stop_button.setEnabled(False)
-        run_layout.addWidget(self.stop_button)
         right_quarter_layout.addLayout(run_layout)
 
         # Logging space
@@ -3257,7 +3258,6 @@ Main window and start config for the Bouzyges system.
         self.options_container.setEnabled(False)
         self.io_container.setEnabled(False)
         self.run_button.setEnabled(False)
-        self.stop_button.setEnabled(True)
 
         self.__start_subthread("Bouzyges Preparation", get_bouzyges)
 
@@ -3273,10 +3273,11 @@ Main window and start config for the Bouzyges system.
         self.reset_ui()
 
     def reset_ui(self) -> None:
+        self.input_options_widget.set_values()
+        self.out_options_widget.set_values()
         self.options_container.setEnabled(True)
         self.io_container.setEnabled(True)
         self.run_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
 
     def __start_subthread(self, name: str, target: Callable, *args, **kwargs):
         if self._bouzyges_subthread:
@@ -3473,6 +3474,111 @@ Main window and start config for the Bouzyges system.
             text = None
         PARAMS.api.cache_db = text
         self.logger.debug(f"Cache database path changed to: {text}")
+
+    def populate_menu(self, menubar: QtWidgets.QMenuBar) -> None:
+        file_menu = menubar.addMenu("File")
+        help_menu = menubar.addMenu("Help")
+
+        if file_menu is None or help_menu is None:
+            raise RuntimeError("Could not create menu bar")
+
+        # File menu items
+        load_config_action = QtGui.QAction(
+            icon=QtGui.QIcon.fromTheme("document-open"),
+            text="Load configuration",
+            parent=self,
+        )
+        load_config_action.triggered.connect(self.load_config)
+        load_config_action.setShortcut("Ctrl+O")
+        file_menu.addAction(load_config_action)
+
+        save_config_action = QtGui.QAction(
+            icon=QtGui.QIcon.fromTheme("document-save"),
+            text="Save configuration",
+            parent=self,
+        )
+        save_config_action.triggered.connect(self.save_config)
+        save_config_action.setShortcut("Ctrl+S")
+        file_menu.addAction(save_config_action)
+
+        quit_action = QtGui.QAction(
+            icon=QtGui.QIcon.fromTheme("application-exit"),
+            text="Quit",
+            parent=self,
+        )
+        quit_action.setShortcut("Ctrl+Q")
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+        # Help menu items
+        about_action = QtGui.QAction(
+            icon=QtGui.QIcon.fromTheme("help-about"), text="About", parent=self
+        )
+        about_action.triggered.connect(self.about)
+        help_menu.addAction(about_action)
+
+        license_action = QtGui.QAction(
+            icon=QtGui.QIcon.fromTheme("help-about"),
+            text="License",
+            parent=self,
+        )
+        license_action.triggered.connect(self.license)
+        help_menu.addAction(license_action)
+
+        report_issue_action = QtGui.QAction(
+            icon=QtGui.QIcon.fromTheme("help-report-bug"),
+            text="Report an issue or get help",
+            parent=self,
+        )
+        report_issue_action.triggered.connect(self.report_issue)
+        report_issue_action.setShortcut("F1")
+        help_menu.addAction(report_issue_action)
+
+    def about(self):
+        label = (
+            "Bouzyges is a tool for identifying the most specific "
+            "ancestors of a set of terms in the SNOMED CT ontology."
+            "\n\n"
+            "All information is available at the project's GitHub page."
+        )
+        QtWidgets.QMessageBox.about(self, "About Bouzyges", label)
+
+    def report_issue(self):
+        webbrowser.open("https://github.com/OHDSI/Bouzyges")
+
+    def license(self):
+        # TODO: Add license
+        QtWidgets.QMessageBox.about(
+            self,
+            "License",
+            "Bouzyges is not currently licensed for distribution, nor for use. "
+            "If you are using it now, consider yourself a developer. All risks "
+            "are yours.",
+        )
+
+    def load_config(self):
+        file = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select JSON configuration file",
+        )
+        if file:
+            with open(file[0], "r") as f:
+                json_config = json.load(f)
+                PARAMS.update(json_config)
+                self.reset_ui()
+
+            self.logger.info(f"Configuration loaded from {file[0]}")
+
+    def save_config(self):
+        file = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save JSON configuration file",
+        )
+        if file:
+            with open(file[0], "w") as f:
+                json.dump(PARAMS.model_dump(), f, indent=2)
+
+            self.logger.info(f"Configuration saved to {file[0]}")
 
 
 def main():
