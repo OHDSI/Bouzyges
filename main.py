@@ -8,7 +8,6 @@ import itertools
 import json
 import logging
 import os
-import pandas as pd
 import pstats
 import re
 import sqlite3
@@ -28,6 +27,7 @@ from typing import (
 )
 
 import openai
+import pandas as pd
 import requests
 import tenacity
 from frozendict import frozendict
@@ -722,14 +722,22 @@ Get the answer from the cache for specified model.
         prompt_is_json = not isinstance(prompt.prompt_message, str)
         prompt_text = json.dumps(prompt.prompt_message)
 
-        cursor = self.connection.cursor()
-        cursor.execute(
-            query,
-            (model, prompt_text, prompt_is_json, api_options),
-        )
-        if answer := cursor.fetchone():
-            return answer[0]
-        return None
+        # TODO: form an event queue for this; sqlite does not do well in
+        # multi-threaded environments
+        try:
+            cursor = self.connection.cursor()
+            cursor.execute(
+                query,
+                (model, prompt_text, prompt_is_json, api_options),
+            )
+            if answer := cursor.fetchone():
+                return answer[0]
+            return None
+        except (sqlite3.InterfaceError, sqlite3.DatabaseError):
+            self.logger.warning(
+                f"Cache access failed for prompt: {json.dumps(asdict(prompt))}"
+            )
+            return None
 
     def remember(self, model: str, prompt: Prompt, response: str) -> None:
         """\
@@ -1409,18 +1417,7 @@ Prompt the model to choose the best matching proximal ancestor for a term.
         )
         self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
 
-        # Try the cache
-        # TODO: form an event queue for this; sqlite does not do well in
-        # multi-threaded environments
-        try:
-            cached_answer = self.cache_get(prompt)
-        except (sqlite3.InterfaceError, sqlite3.DatabaseError):
-            self.logger.warning(
-                f"Cache access failed for prompt: {json.dumps(asdict(prompt))}"
-            )
-            cached_answer = None
-
-        if cached_answer:
+        if cached_answer := self.cache_get(prompt):
             answer = self.unwrap_class_answer(
                 cached_answer,
                 options,
