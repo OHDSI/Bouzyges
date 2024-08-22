@@ -16,7 +16,7 @@ import sys
 import threading
 import unittest
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import (
     Callable,
     Iterable,
@@ -215,37 +215,39 @@ Parameters for reading and writing file data.
     quoting: int = csv.QUOTE_MINIMAL
 
     def __init__(self, file: str, name: str) -> None:
+        self.widget = QtWidgets.QWidget()
         self._populate_layout()
         self.file = file
         self.logger = LOGGER.getChild(name)
 
     def _populate_layout(self) -> None:
-        self.layout = QtWidgets.QHBoxLayout()
+        self._layout = QtWidgets.QHBoxLayout()
         separator = QtWidgets.QComboBox()
         separator.addItems(map(lambda s: "Separator: " + s, SEPARATORS))
         separator.setCurrentIndex(2)
         separator.currentIndexChanged.connect(self.separator_changed)
-        self.layout.addWidget(separator)
+        self._layout.addWidget(separator)
         quoting_policy = QtWidgets.QComboBox()
         quoting_policy.addItems(QUOTING_POLICY.values())
         quoting_policy.currentIndexChanged.connect(self.quoting_policy_changed)
-        self.layout.addWidget(quoting_policy)
+        self._layout.addWidget(quoting_policy)
         qchar_label = QtWidgets.QLabel("Quote character:")
-        self.layout.addWidget(qchar_label)
+        self._layout.addWidget(qchar_label)
         self.quote_char = QtWidgets.QLineEdit()
         self.quote_char.setPlaceholderText('"')
         self.quote_char.setText('"')
         self.quote_char.setMaximumWidth(30)
         self.quote_char.textChanged.connect(self.quote_char_changed)
         self.quote_char.setEnabled(self.quoting != csv.QUOTE_NONE)
-        self.layout.addWidget(self.quote_char)
+        self._layout.addWidget(self.quote_char)
         spacer = QtWidgets.QSpacerItem(
             40,
             20,
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Minimum,
         )
-        self.layout.addItem(spacer)
+        self._layout.addItem(spacer)
+        self.widget.setLayout(self._layout)
 
     def separator_changed(self, index) -> None:
         self.sep = SEPARATORS[index]
@@ -1408,7 +1410,17 @@ Prompt the model to choose the best matching proximal ancestor for a term.
         self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
 
         # Try the cache
-        if cached_answer := self.cache_get(prompt):
+        # TODO: form an event queue for this; sqlite does not do well in
+        # multi-threaded environments
+        try:
+            cached_answer = self.cache_get(prompt)
+        except (sqlite3.InterfaceError, sqlite3.DatabaseError):
+            self.logger.warning(
+                f"Cache access failed for prompt: {json.dumps(asdict(prompt))}"
+            )
+            cached_answer = None
+
+        if cached_answer:
             answer = self.unwrap_class_answer(
                 cached_answer,
                 options,
@@ -2517,6 +2529,7 @@ JSON schema:
 
         with open(self.path, "w") as f:
             json.dump(self.content, f, indent=2)
+
         self.logger.info(f"Written to {self.path}")
 
 
@@ -3110,7 +3123,7 @@ Main window and start config for the Bouzyges system.
         input_select.clicked.connect(self.select_input)
         input_contents.addWidget(input_select)
         input_layout.addLayout(input_contents)
-        input_layout.addLayout(PARAMS.read.layout)
+        input_layout.addWidget(PARAMS.read.widget)
 
         # Output selection
         output_layout = QtWidgets.QVBoxLayout()
@@ -3145,11 +3158,12 @@ Main window and start config for the Bouzyges system.
             FileWriter.get_formats().index(PARAMS.format)
         )
         out_format_select.currentIndexChanged.connect(self.format_changed)
+        PARAMS.write.widget.setEnabled(PARAMS.format != "JSON")
         out_file_contents.addWidget(out_format_select)
 
         output_layout.addLayout(out_dir_contents)
         output_layout.addLayout(out_file_contents)
-        output_layout.addLayout(PARAMS.write.layout)
+        output_layout.addWidget(PARAMS.write.widget)
 
         layout.addLayout(input_layout)
         layout.addItem(self._verticalSpacer)
@@ -3158,6 +3172,7 @@ Main window and start config for the Bouzyges system.
 
     def format_changed(self, idx: int) -> None:
         PARAMS.format = FileWriter.get_formats()[idx]
+        PARAMS.write.widget.setEnabled(PARAMS.format != "JSON")
         self.logger.info(f"Output format changed to {PARAMS.format}")
 
     def select_input(self):
