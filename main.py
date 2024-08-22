@@ -195,14 +195,14 @@ class EnvironmentParameters(pydantic.BaseModel):
 Parameters that reflect the environment variables.
 """
 
-    openai_api_key: str | None = None
-    azure_api_key: str | None = None
-    azure_api_endpoint: str | None = None
+    OPENAI_API_KEY: str | None = None
+    AZURE_API_KEY: str | None = None
+    AZURE_API_ENDPOINT: str | None = None
 
     def fill_from_env(self) -> None:
-        self.openai_api_key = os.getenv("OPENAI_API_KEY")
-        self.azure_api_key = os.getenv("AZURE_OPENAI_API_KEY")
-        self.azure_api_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
+        for env in self.model_fields:
+            env_value = os.getenv(env)
+            setattr(self, env, env_value or None)
 
 
 class IOParameters(pydantic.BaseModel):
@@ -2634,8 +2634,8 @@ Main logic host for the Bouzyges system.
             case "azure":
                 prompter = OpenAIAzurePrompter(
                     prompt_format=OpenAIPromptFormat(),
-                    api_key=PARAMS.env.azure_api_key,
-                    azure_endpoint=PARAMS.env.azure_api_endpoint,
+                    api_key=PARAMS.env.AZURE_API_KEY,
+                    azure_endpoint=PARAMS.env.AZURE_API_ENDPOINT,
                     model=PARAMS.api.llm_model_id,
                 )
             case "human":
@@ -3049,6 +3049,69 @@ A logging handler that outputs log records to a QListView widget.
         # Limit the number of records
         if self.model.rowCount() > self.max_records:
             self.model.removeRow(0)
+
+
+class EnvironmentVariableEditor(QtWidgets.QDialog):
+    """\
+A dialog to edit environment variables.
+"""
+
+    def __init__(
+        self, parent: BouzygesWindow, variables: EnvironmentParameters
+    ) -> None:
+        super().__init__(parent)
+        self.logger = parent.logger.getChild(self.__class__.__name__)
+        self.variables = variables
+        self.parent_window = parent
+
+        self.setWindowTitle("Override Environment variables")
+        self.__dict = {}
+        master_layout = QtWidgets.QVBoxLayout()
+        warning_label = QtWidgets.QLabel(
+            "<b>Warning</b>: Environment variables will not persist between "
+            "sessions. For security reasons, they are neither logged nor "
+            "saved in config JSON file. Use <code>.env</code> file for "
+            "permanent changes."
+        )
+        warning_label.setWordWrap(True)
+        master_layout.addWidget(warning_label)
+
+        for envvar, value in variables.model_dump().items():
+            self.__dict[envvar] = value
+            layout = QtWidgets.QHBoxLayout()
+            label = QtWidgets.QLabel(envvar.upper())
+            label.setFixedWidth(200)
+            layout.addWidget(label)
+            edit = QtWidgets.QLineEdit()
+            edit.setText(value)
+            edit.setPlaceholderText("Unset")
+            edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.PasswordEchoOnEdit)
+            edit.setMinimumWidth(300)
+            layout.addWidget(edit)
+            master_layout.addLayout(layout)
+        self.setLayout(master_layout)
+
+        buttons_layout = QtWidgets.QHBoxLayout()
+        cancel_button = QtWidgets.QPushButton("Cancel")
+        cancel_button.clicked.connect(self.reject)
+        save_button = QtWidgets.QPushButton("Save")
+        save_button.clicked.connect(self.save)
+
+        buttons_layout.addWidget(cancel_button)
+        buttons_layout.addWidget(save_button)
+        master_layout.addLayout(buttons_layout)
+
+    def save(self):
+        for envvar, value in self.__dict.items():
+            if value:
+                logging.debug(f"Setting {envvar} to a new value")
+            else:
+                logging.debug(f"Unsetting {envvar}")
+            setattr(self.variables, envvar, value or None)
+            # Set them to os module to make sure they are available
+            os.environ[envvar] = value or ""
+        self.parent_window.reset_ui()
+        self.accept()
 
 
 class BouzygesWindow(QtWidgets.QMainWindow):
@@ -3477,9 +3540,10 @@ Main window and start config for the Bouzyges system.
 
     def populate_menu(self, menubar: QtWidgets.QMenuBar) -> None:
         file_menu = menubar.addMenu("File")
+        edit_menu = menubar.addMenu("Edit")
         help_menu = menubar.addMenu("Help")
 
-        if file_menu is None or help_menu is None:
+        if file_menu is None or edit_menu is None or help_menu is None:
             raise RuntimeError("Could not create menu bar")
 
         # File menu items
@@ -3509,6 +3573,17 @@ Main window and start config for the Bouzyges system.
         quit_action.setShortcut("Ctrl+Q")
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+        # Edit menu items
+        edit_env_action = QtGui.QAction(
+            icon=QtGui.QIcon.fromTheme("preferences-system"),
+            text="Override environment variables",
+            parent=self,
+        )
+        edit_env_action.triggered.connect(
+            lambda: EnvironmentVariableEditor(self, PARAMS.env).exec()
+        )
+        edit_menu.addAction(edit_env_action)
 
         # Help menu items
         about_action = QtGui.QAction(
