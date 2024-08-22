@@ -28,6 +28,7 @@ from typing import (
 
 import openai
 import pandas as pd
+import pydantic
 import requests
 import tenacity
 from frozendict import frozendict
@@ -84,10 +85,6 @@ class SCGExpression(str):
     """SNOMED CT Compositional Grammar expression"""
 
 
-class URL(str):
-    """REST URL string"""
-
-
 class EscapeHatch(object):
     """\
 "Escape hatch" sentinel type for prompters
@@ -118,6 +115,7 @@ OpenAIPromptRole: TypeAlias = Literal["user", "system", "assisstant"]
 OpenAIMessages: TypeAlias = tuple[frozendict[OpenAIPromptRole, str]]
 OutFormat: TypeAlias = Literal["SCG", "CRS", "JSON"]
 T = TypeVar("T")
+Url = str
 
 ## Logging
 LOGGER = logging.getLogger("Bouzyges")
@@ -158,8 +156,7 @@ QUOTING_POLICY: dict[int, str] = {
 }
 
 
-@dataclass
-class ProfilingParameters:
+class ProfilingParameters(pydantic.BaseModel):
     """\
 Parameters to control profiling of the program.
 """
@@ -168,8 +165,7 @@ Parameters to control profiling of the program.
     stop_profiling_after_seconds: int | None = None
 
 
-@dataclass
-class LoggingParameters:
+class LoggingParameters(pydantic.BaseModel):
     """\
 Parameters to control logging.
 """
@@ -182,20 +178,18 @@ Parameters to control logging.
         LOGGER.setLevel(level=self.logging_level)
 
 
-@dataclass
-class APIParameters:
+class APIParameters(pydantic.BaseModel):
     """\
 Parameters to control the interface to Snowstorm, cache and LLMs.
 """
 
     prompter: PrompterOption = "openai"
-    snowstorm_url: URL = URL("http://localhost:8080/")
+    snowstorm_url: Url = Url("http://localhost:8080/")
     llm_model_id: str = DEFAULT_MODEL
     cache_db: str | None = "prompt_cache.db"
 
 
-@dataclass
-class EnvironmentParameters:
+class EnvironmentParameters(pydantic.BaseModel):
     """\
 Parameters that reflect the environment variables.
 """
@@ -205,49 +199,54 @@ Parameters that reflect the environment variables.
     azure_api_endpoint: str | None = os.getenv("AZURE_OPENAI_ENDPOINT")
 
 
-class IOParameters:
+class IOParameters(pydantic.BaseModel):
     """\
-Parameters for reading and writing file data.
+Parameters for reading and writing CSV file data.
 """
 
+    file: str
     sep: str = "Tab"
     quotechar: str = '"'
     quoting: int = csv.QUOTE_MINIMAL
 
-    def __init__(self, file: str, name: str) -> None:
-        self.widget = QtWidgets.QWidget()
-        self._populate_layout()
-        self.file = file
+
+class IOParametersWidget(QtWidgets.QWidget):
+    def __init__(self, par: IOParameters, name: str, *args, **kwargs) -> None:
+        # Add pydantic fields
+        super().__init__(*args, **kwargs)
+
         self.logger = LOGGER.getChild(name)
+        self.parameters: IOParameters = par
+        self._populate_layout()
 
     def _populate_layout(self) -> None:
-        self._layout = QtWidgets.QHBoxLayout()
+        layout = QtWidgets.QHBoxLayout()
         separator = QtWidgets.QComboBox()
         separator.addItems(map(lambda s: "Separator: " + s, SEPARATORS))
         separator.setCurrentIndex(2)
         separator.currentIndexChanged.connect(self.separator_changed)
-        self._layout.addWidget(separator)
+        layout.addWidget(separator)
         quoting_policy = QtWidgets.QComboBox()
         quoting_policy.addItems(QUOTING_POLICY.values())
         quoting_policy.currentIndexChanged.connect(self.quoting_policy_changed)
-        self._layout.addWidget(quoting_policy)
+        layout.addWidget(quoting_policy)
         qchar_label = QtWidgets.QLabel("Quote character:")
-        self._layout.addWidget(qchar_label)
-        self.quote_char = QtWidgets.QLineEdit()
-        self.quote_char.setPlaceholderText('"')
-        self.quote_char.setText('"')
-        self.quote_char.setMaximumWidth(30)
-        self.quote_char.textChanged.connect(self.quote_char_changed)
-        self.quote_char.setEnabled(self.quoting != csv.QUOTE_NONE)
-        self._layout.addWidget(self.quote_char)
+        layout.addWidget(qchar_label)
+        self.quotechar = QtWidgets.QLineEdit()
+        self.quotechar.setPlaceholderText('"')
+        self.quotechar.setText('"')
+        self.quotechar.setMaximumWidth(30)
+        self.quotechar.textChanged.connect(self.quote_char_changed)
+        self.quotechar.setEnabled(self.parameters.quoting != csv.QUOTE_NONE)
+        layout.addWidget(self.quotechar)
         spacer = QtWidgets.QSpacerItem(
             40,
             20,
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Minimum,
         )
-        self._layout.addItem(spacer)
-        self.widget.setLayout(self._layout)
+        layout.addItem(spacer)
+        self.setLayout(layout)
 
     def separator_changed(self, index) -> None:
         self.sep = SEPARATORS[index]
@@ -259,7 +258,7 @@ Parameters for reading and writing file data.
             f"Quoting policy changed to: {self.quoting}:"
             f"{QUOTING_POLICY[self.quoting]}"
         )
-        self.quote_char.setEnabled(self.quoting != csv.QUOTE_NONE)
+        self.quotechar.setEnabled(self.quoting != csv.QUOTE_NONE)
 
     def quote_char_changed(self, text) -> None:
         self.quotechar = text
@@ -274,7 +273,7 @@ Parameters for reading and writing file data.
         self.logger.debug(f"Input file set to: {file}")
 
 
-class RunParameters:
+class RunParameters(pydantic.BaseModel):
     """\
 Parameters for the run of the program.
 """
@@ -283,14 +282,14 @@ Parameters for the run of the program.
     env: EnvironmentParameters = EnvironmentParameters()
     log: LoggingParameters = LoggingParameters()
     prof: ProfilingParameters = ProfilingParameters()
-    read: IOParameters = IOParameters("Test.csv", "Read")
-    write: IOParameters = IOParameters("bouzyges_output.csv", "Write")
+    read: IOParameters = IOParameters(file="Test.csv")
+    write: IOParameters = IOParameters(file="bouzyges_output.csv")
     format: OutFormat = "JSON"
     out_dir: str = os.getcwd()
 
 
 PARAMS = RunParameters()
-
+LOGGER.info(f"Parameters loaded: {PARAMS.model_dump(mode='json')}")
 ## Logic constants
 ### MRCM
 MRCM_DOMAIN_REFERENCE_SET_ECL = ECLExpression("<<723589008")
@@ -440,7 +439,7 @@ more useful information for domain modelling, but it is not yet well explored.
 
     # Additional fields
     domain_constraint: ECLExpression
-    guide_link: URL  # For eventual RAG connection
+    guide_link: Url  # For eventual RAG connection
     # Currently uses unparseable extension of ECL grammar,
     # but one day we will use it
     domain_template: ECLExpression
@@ -461,7 +460,7 @@ more useful information for domain modelling, but it is not yet well explored.
                 af["domainTemplateForPrecoordination"]
             ),
             domain_constraint=ECLExpression(af["domainConstraint"]),
-            guide_link=URL(af["guideURL"]),
+            guide_link=Url(af["guideURL"]),
             parent_domain=ECLExpression(dom) if dom else None,
             proximal_primitive_refinement=ECLExpression(prf) if prf else None,
         )
@@ -1844,12 +1843,12 @@ class SnowstormAPI:
     PAGINATION_STEP = 100
     MAX_BAD_PARENT_QUERY = 32
 
-    def __init__(self, url: URL):
+    def __init__(self, url: Url):
         # Debug
         self.__start_time = datetime.datetime.now()
         self.logger = LOGGER.getChild(self.__class__.__name__)
 
-        self.url: URL = url
+        self.url: Url = url
         self.branch_path: BranchPath = self.get_main_branch_path()
 
         # Cache repetitive queries
@@ -3120,7 +3119,8 @@ Main window and start config for the Bouzyges system.
         input_select.clicked.connect(self.select_input)
         input_contents.addWidget(input_select)
         input_layout.addLayout(input_contents)
-        input_layout.addWidget(PARAMS.read.widget)
+        self.input_options_widget = IOParametersWidget(PARAMS.read, "Read")
+        input_layout.addWidget(self.input_options_widget)
 
         # Output selection
         output_layout = QtWidgets.QVBoxLayout()
@@ -3143,9 +3143,10 @@ Main window and start config for the Bouzyges system.
         out_file_label = QtWidgets.QLabel("File name:")
         out_file_contents.addWidget(out_file_label)
         output_filename = QtWidgets.QLineEdit()
+        self.out_options_widget = IOParametersWidget(PARAMS.write, "Write")
         output_filename.setPlaceholderText("Output file name")
         output_filename.setText(PARAMS.write.file)
-        output_filename.textChanged.connect(PARAMS.write.update_file)
+        output_filename.textChanged.connect(self.out_options_widget.update_file)
         out_file_contents.addWidget(output_filename)
         out_format_label = QtWidgets.QLabel("Format:")
         out_file_contents.addWidget(out_format_label)
@@ -3155,12 +3156,12 @@ Main window and start config for the Bouzyges system.
             FileWriter.get_formats().index(PARAMS.format)
         )
         out_format_select.currentIndexChanged.connect(self.format_changed)
-        PARAMS.write.widget.setEnabled(PARAMS.format != "JSON")
+        self.out_options_widget.setEnabled(PARAMS.format != "JSON")
         out_file_contents.addWidget(out_format_select)
 
         output_layout.addLayout(out_dir_contents)
         output_layout.addLayout(out_file_contents)
-        output_layout.addWidget(PARAMS.write.widget)
+        output_layout.addWidget(self.out_options_widget)
 
         layout.addLayout(input_layout)
         layout.addItem(self._verticalSpacer)
@@ -3169,7 +3170,7 @@ Main window and start config for the Bouzyges system.
 
     def format_changed(self, idx: int) -> None:
         PARAMS.format = FileWriter.get_formats()[idx]
-        PARAMS.write.widget.setEnabled(PARAMS.format != "JSON")
+        self.out_options_widget.setEnabled(PARAMS.format != "JSON")
         self.logger.info(f"Output format changed to {PARAMS.format}")
 
     def select_input(self):
@@ -3178,7 +3179,9 @@ Main window and start config for the Bouzyges system.
             "Select input CSV file",
         )
         if file:
-            PARAMS.read.update_file(file[0], self.input_file.setText)
+            self.input_options_widget.update_file(
+                file[0], self.input_file.setText
+            )
 
     def select_output(self):
         dir = QtWidgets.QFileDialog.getExistingDirectory(
@@ -3420,7 +3423,7 @@ Main window and start config for the Bouzyges system.
     def snowstorm_url_changed(self, text) -> None:
         if not text:
             text = "http://localhost:8080/"
-        PARAMS.api.snowstorm_url = URL(text)
+        PARAMS.api.snowstorm_url = Url(text)
         self.logger.debug(f"Snowstorm URL changed to: {text}")
 
     def model_id_changed(self, text) -> None:
