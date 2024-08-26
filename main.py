@@ -25,6 +25,7 @@ from typing import (
     TypeAlias,
     TypeVar,
 )
+import uuid
 
 import openai
 import pandas as pd
@@ -1872,6 +1873,38 @@ A prompter that interfaces with the OpenAI API using Azure.
         self._ping_headers = {"api-key": self._client.api_key}
 
 
+PrompterT = TypeVar("PrompterT", bound=Prompter)
+
+
+class PrompterArray[Prompter]:
+    """\
+Container for multiple prompters, allowing workers from different threads to
+have their own prompter instances.
+
+Prompters are assumed to be synchronous and stateless API wrappers, ergo this
+approach.
+"""
+
+    def __init__(self, factory: type[PrompterT], *args, **kwargs):
+        self.logger = LOGGER.getChild(self.__class__.__name__)
+        self.prompters = {}
+        self._factory = factory
+        self._args = args
+        self._kwargs = kwargs
+
+        # Initialize examplar prompter and ping it to ensure it's working
+        self._examplar = self._factory(*args, **kwargs)
+        if not self._examplar.ping():
+            self.logger.error("Prompter API is not available!")
+            raise BouzygesError("Prompter API is not available")
+
+    def __getitem__(self, key: uuid.UUID) -> Prompter:
+        if key not in self.prompters:
+            self.logger.info(f"Creating a new prompter for worker {key}")
+            self.prompters[key] = self._factory(*self._args, **self._kwargs)
+        return self.prompters[key]
+
+
 class SnowstormAPI:
     TARGET_CODESYSTEM = "SNOMEDCT"
     CONTENT_TYPE_PREFERENCE = "NEW_PRECOORDINATED", "PRECOORDINATED", "ALL"
@@ -2598,11 +2631,11 @@ Main logic host for the Bouzyges system.
     def __init__(
         self,
         snowstorm: SnowstormAPI,
-        prompter: Prompter,
+        prompter_array: PrompterArray,
         portraits: Iterable[SemanticPortrait],
     ):
         self.snowstorm = snowstorm
-        self.prompter = prompter
+        self.prompter_array = prompter_array
         self.portraits = {p.source_term: p for p in portraits}
 
         self.logger = LOGGER.getChild(self.__class__.__name__)
@@ -2647,36 +2680,36 @@ Main logic host for the Bouzyges system.
             logger.error("Could not connect to Snowstorm API:", e)
             raise BouzygesError("Could not connect to Snowstorm API")
 
-        prompter: Prompter
+        prompter_array: PrompterArray
         match PARAMS.api.prompter:
             case "openai":
-                prompter = OpenAIPrompter(
+                prompter_array = PrompterArray(
+                    OpenAIPrompter,
                     prompt_format=OpenAIPromptFormat(),
                     model=PARAMS.api.llm_model_id,
                 )
 
             case "azure":
-                prompter = OpenAIAzurePrompter(
+                prompter_array = PrompterArray(
+                    OpenAIAzurePrompter,
                     prompt_format=OpenAIPromptFormat(),
                     api_key=PARAMS.env.AZURE_API_KEY,
                     azure_endpoint=PARAMS.env.AZURE_API_ENDPOINT,
                     model=PARAMS.api.llm_model_id,
                 )
             case "human":
-                prompter = HumanPrompter(
-                    prompt_function=input, prompt_format=VerbosePromptFormat()
+                prompter_array = PrompterArray(
+                    HumanPrompter,
+                    prompt_function=input,
+                    prompt_format=VerbosePromptFormat(),
                 )
 
             case _:
                 raise ValueError("Invalid prompter option")
 
-        if not prompter.ping():
-            logger.error("Prompter API is not available!")
-            raise BouzygesError("Prompter API is not available")
-
         bouzyges = cls(
             snowstorm=snowstorm,
-            prompter=prompter,
+            prompter_array=prompter_array,
             portraits=portraits,
         )
         return bouzyges
@@ -2731,7 +2764,6 @@ Run the Bouzyges system.
                     stats.dump_stats("stats.prof")
         else:
             self._run()
-        self.prompter.report_usage()
 
 
 class _BouzygesWorker:
@@ -2754,7 +2786,7 @@ source term.
         )
         self.logger = bouzyges.logger.getChild(f"Worker {idx}:{term_abbrev}")
         self.snowstorm = bouzyges.snowstorm
-        self.prompter = bouzyges.prompter
+        self.prompter = bouzyges.prompter_array[uuid.uuid4()]
         self.mrcm_entries = bouzyges.mrcm_entries
 
         self.logger.info(f"Worker for '{self.source_term}' is ready")
@@ -2775,6 +2807,7 @@ Run the worker thread.
                 f"Time taken (s): "
                 f"{(datetime.datetime.now() - start_time).total_seconds()}"
             )
+            self.prompter.report_usage()
 
     def _run(self) -> WrappedResult:
         self.initialize_supertypes()
@@ -3355,9 +3388,13 @@ Main window and start config for the Bouzyges system.
         bouzyges_capture: dict[str, Bouzyges] = {}
 
         def get_bouzyges():
-            bouzyges_capture["success"] = Bouzyges.prepare(
-                logger=LOGGER,
-            )
+            try:
+                bouzyges_capture["success"] = Bouzyges.prepare(
+                    logger=LOGGER,
+                )
+            except Exception as e:
+                self.logger.error(f"Could not prepare Bouzyges: {e}")
+                raise
 
         self.options_container.setEnabled(False)
         self.io_container.setEnabled(False)
