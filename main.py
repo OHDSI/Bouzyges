@@ -698,7 +698,7 @@ Has option to store API parameters for the answer.
     api_options: frozendict[str, JsonPrimitive] | None = None
 
     def to_json(self) -> JsonDict:
-        """Convert the prompt to a JSON-serializable format."""
+        """Convert the prompt to a JSON-serializable format for caching."""
         if isinstance(self.prompt_message, str):
             message = self.prompt_message
         else:
@@ -707,17 +707,13 @@ Has option to store API parameters for the answer.
                 for message in self.prompt_message
             ]
 
-        if self.api_options:
-            api_options = {k: v for k, v in self.api_options}
-        else:
-            api_options = None
+        api_options = dict(self.api_options) if self.api_options else None
 
         return {
             "prompt_text": json.dumps(message, sort_keys=True),
             "prompt_is_json": not isinstance(self.prompt_message, str),
-            "options": sorted(map(str, self.options)) if self.options else None,
-            "api_options": api_options,
-        }  # type:ignore
+            "api_options": json.dumps(api_options),
+        }  # pyright: ignore[reportReturnType]  # Ruff says it's okay
 
 
 # Logic classes
@@ -753,7 +749,6 @@ tokens.
 Get the answer from the cache for specified model.
 """
         prompt_dict = prompt.to_json()
-        options_are_none = prompt_dict["options"] is None
         api_are_none = prompt_dict["api_options"] is None
 
         query = f"""
@@ -762,9 +757,8 @@ Get the answer from the cache for specified model.
             WHERE
                 model = ? AND
                 prompt_text = ? AND
-                options {'IS' if options_are_none else '=' } ? AND
                 prompt_is_json = ? AND
-                api_options {'IS' if api_are_none else '=' } ?
+                api_options {"IS" if api_are_none else "="} ?
         """
 
         try:
@@ -789,7 +783,11 @@ Remember the answer for the prompt for the specified model.
 """
         query = f"""
             INSERT INTO {self.table_name} (
-                model, prompt_text, prompt_is_json, api_options, response
+                model,
+                prompt_text,
+                prompt_is_json,
+                api_options,
+                response
             )
             VALUES (?, ?, ?, ?, ?)
         """
@@ -1085,7 +1083,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         )
 
         return Prompt(
-            history,  # type:ignore
+            history,  # pyright: ignore[reportArgumentType]
             options,
             escape_hatch,
             self.default_api_options,
