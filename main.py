@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import concurrent.futures
+import asyncio
 import cProfile
 import csv
 import datetime
@@ -2725,10 +2725,11 @@ Main logic host for the Bouzyges system.
             for i, portrait in enumerate(self.portraits.values())
         ]
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
-            results: Iterable[WrappedResult] = executor.map(
-                _BouzygesWorker.run, workers
-            )
+        async def run_all_workers():
+            coroutines = [worker.run() for worker in workers]
+            return await asyncio.gather(*coroutines)
+
+        results = asyncio.run(run_all_workers())
 
         self.logger.info("Routine finished")
         self.logger.info(
@@ -2792,14 +2793,14 @@ source term.
 
         self.logger.info(f"Worker for '{self.source_term}' is ready")
 
-    def run(self) -> WrappedResult:
+    async def run(self) -> WrappedResult:
         """\
 Run the worker thread.
 """
         start_time = datetime.datetime.now()
         self.logger.info(f"Started at: {start_time}")
         try:
-            return self._run()
+            return await self._run()
         except Exception as e:
             self.logger.error(f"An error occurred: {e}")
             raise
@@ -2810,20 +2811,17 @@ Run the worker thread.
             )
             self.prompter.report_usage()
 
-    def _run(self) -> WrappedResult:
-        self.initialize_supertypes()
-        self.populate_attribute_candidates()
-        self.populate_unchecked_attributes()
-        self.update_existing_attr_values()
-        self.logger.info(f" - {self.source_term} attributes:")
-        for attribute, value in self.portrait.attributes.items():
-            self.logger.info(f"   - {attribute} {value}")
+    async def _run(self) -> WrappedResult:
+        await self.initialize_supertypes()
+        await self.populate_attribute_candidates()
+        await self.populate_unchecked_attributes()
+        await self.update_existing_attr_values()
 
         changes_made = updated = True
         while changes_made:
             cycles = 0
             while updated:
-                updated = self.update_anchors()
+                updated = await self.update_anchors()
                 cycles += updated
             changes_made = bool(cycles)
 
@@ -2847,7 +2845,7 @@ Run the worker thread.
 
         return WrappedResult(self.portrait, anchors)
 
-    def initialize_supertypes(self):
+    async def initialize_supertypes(self):
         """\
 Initialize supertypes for all terms to start building portraits.
 """
@@ -2881,7 +2879,7 @@ Initialize supertypes for all terms to start building portraits.
                     "did the Prompter inject the escape hatch?"
                 )
 
-    def populate_attribute_candidates(self) -> None:
+    async def populate_attribute_candidates(self) -> None:
         attributes = self.snowstorm.get_attribute_suggestions(
             self.portrait.ancestor_anchors
         )
@@ -2918,7 +2916,7 @@ Initialize supertypes for all terms to start building portraits.
                 continue
             self.portrait.relevant_constraints[sctid] = attribute
 
-    def populate_unchecked_attributes(self) -> None:
+    async def populate_unchecked_attributes(self) -> None:
         rejected = set()
         for attribute in self.portrait.unchecked_attributes:
             self.logger.debug(f"Attribute: {attribute}")
@@ -2965,7 +2963,7 @@ Initialize supertypes for all terms to start building portraits.
         # All are seen by now
         self.portrait.unchecked_attributes = set()
 
-    def update_existing_attr_values(self) -> None:
+    async def update_existing_attr_values(self) -> None:
         """\
 Update existing attribute values with the most precise descendant for all terms.
 """
@@ -3002,18 +3000,18 @@ Update existing attribute values with the most precise descendant for all terms.
 
         self.portrait.attributes.update(new_attributes)
 
-    def update_anchors(self) -> bool:
+    async def update_anchors(self) -> bool:
         i = 0
         ancestors_changed = True
         while ancestors_changed:
-            ancestors_changed = self.__update_anchor()
+            ancestors_changed = await self.__update_anchor()
             i += ancestors_changed
         self.logger.info(
             f"Updated {self.source_term} anchors in {i} iterations."
         )
         return i > 1
 
-    def __update_anchor(self) -> bool:
+    async def __update_anchor(self) -> bool:
         """\
 Update the ancestor anchors for one term to more precise children. Performs a
 single iteration. Return True if the parent anchors have changed, False
