@@ -1436,7 +1436,7 @@ Check if the answer contains a yes or no option.
                 "Could not find an unambiguous boolean answer in the response"
             )
 
-    def prompt_supertype(
+    async def prompt_supertype(
         self,
         term: str,
         options: Iterable[SCTDescription],
@@ -1459,15 +1459,15 @@ Prompt the model to choose the best matching proximal ancestor for a term.
                 options,
                 EscapeHatch.WORD if allow_escape else None,
             )
-            self.logger.info(f"From cache: {answer} is a supertype of {term}")
-            return answer
-
-        # Get the answer
-        answer = self._prompt_class_answer(allow_escape, options, prompt)
+        else:
+            # Get the answer
+            answer = await self._prompt_class_answer(
+                allow_escape, options, prompt
+            )
         self.logger.info(f"Agent answer: {answer} is a supertype of {term}")
         return answer
 
-    def prompt_attr_presence(
+    async def prompt_attr_presence(
         self,
         term: str,
         attribute: SCTDescription,
@@ -1480,20 +1480,15 @@ Prompt the model to choose the best matching proximal ancestor for a term.
 
         if cached_answer := self.cache_get(prompt):
             answer = self.unwrap_bool_answer(cached_answer)
-            self.logger.info(
-                f"From cache: The attribute '{attribute}' is "
-                f"{'present' if answer else 'absent'} in '{term}'"
-            )
-            return answer
-
-        answer = self._prompt_bool_answer(prompt)
+        else:
+            answer = await self._prompt_bool_answer(prompt)
         self.logger.info(
             f"Agent answer: The attribute '{attribute}' is "
             f"{'present' if answer else 'absent'} in '{term}'"
         )
         return answer
 
-    def prompt_attr_value(
+    async def prompt_attr_value(
         self,
         term: str,
         attribute: SCTDescription,
@@ -1522,20 +1517,18 @@ Prompt the model to choose the value of an attribute in a term.
                 options,
                 EscapeHatch.WORD if allow_escape else None,
             )
-            self.logger.info(
-                f"From cache: The value of the attribute '{attribute}' in "
-                f"'{term}' is '{answer}'"
+        else:
+            answer = await self._prompt_class_answer(
+                allow_escape, options, prompt
             )
-            return answer
 
-        answer = self._prompt_class_answer(allow_escape, options, prompt)
         self.logger.info(
             f"Agent answer: The value of the attribute '{attribute}' in "
             f"'{term}' is '{answer}'"
         )
         return answer
 
-    def prompt_subsumption(
+    async def prompt_subsumption(
         self,
         term: str,
         prospective_supertype: SCTDescription,
@@ -1554,14 +1547,9 @@ Fully Defined concepts.
 
         if cached_answer := self.cache_get(prompt):
             answer = self.unwrap_bool_answer(cached_answer)
-            self.logger.info(
-                f"From cache: The term '{term}' is "
-                f"{'a subtype' if answer else 'not a subtype'} "
-                f"of '{prospective_supertype}'"
-            )
-            return answer
+        else:
+            answer = await self._prompt_bool_answer(prompt)
 
-        answer = self._prompt_bool_answer(prompt)
         self.logger.info(
             f"From cache: The term '{term}' is "
             f"{'a subtype' if answer else 'not a subtype'} "
@@ -1580,13 +1568,13 @@ Fully Defined concepts.
 
     # Following methods are abstract and represent common queries to the model
     @abstractmethod
-    def _prompt_bool_answer(self, prompt: Prompt) -> bool:
+    async def _prompt_bool_answer(self, prompt: Prompt) -> bool:
         """\
 Send a prompt to the counterpart agent to obtain the answer
 """
 
     @abstractmethod
-    def _prompt_class_answer(
+    async def _prompt_class_answer(
         self,
         allow_escape: bool,
         options: Iterable[SCTDescription],
@@ -1622,7 +1610,7 @@ A test prompter that interacts with a human to get answers.
         super().__init__(*args, **kwargs)
         self.prompt_function = prompt_function
 
-    def _prompt_class_answer(self, allow_escape, options, prompt):
+    async def _prompt_class_answer(self, allow_escape, options, prompt):
         while True:
             brain_answer = self.prompt_function("Answer: ").strip()
             try:
@@ -1637,7 +1625,7 @@ A test prompter that interacts with a human to get answers.
             except PrompterError as e:
                 logging.error("Error: %s", e)
 
-    def _prompt_bool_answer(self, prompt: Prompt) -> bool:
+    async def _prompt_bool_answer(self, prompt: Prompt) -> bool:
         while True:
             brain_answer = self.prompt_function("Answer: ").strip()
             try:
@@ -1731,10 +1719,10 @@ A prompter that interfaces with the OpenAI API using.
         self.logger.warning("API is not available")
         return False
 
-    def _prompt_bool_answer(self, prompt: Prompt) -> bool:
+    async def _prompt_bool_answer(self, prompt: Prompt) -> bool:
         return self._prompt_answer(prompt, self.unwrap_bool_answer)
 
-    def _prompt_class_answer(self, allow_escape, options, prompt):
+    async def _prompt_class_answer(self, allow_escape, options, prompt):
         return self._prompt_answer(
             prompt,
             lambda x: self.unwrap_class_answer(
@@ -1877,6 +1865,7 @@ A prompter that interfaces with the OpenAI API using Azure.
 PrompterT = TypeVar("PrompterT", bound=Prompter)
 
 
+# TODO: Remove this class as we are moving to async
 class PrompterArray[Prompter]:
     """\
 Container for multiple prompters, allowing workers from different threads to
@@ -2858,7 +2847,9 @@ Initialize supertypes for all terms to start building portraits.
         supertypes_decode = {
             entry.term: entry.sctid for entry in self.mrcm_entries
         }
-        supertype_term = self.prompter.prompt_supertype(
+        supertype_term: (
+            SCTDescription | EscapeHatch
+        ) = await self.prompter.prompt_supertype(
             term=self.source_term,
             options=supertypes_decode,
             allow_escape=False,
@@ -2873,28 +2864,32 @@ Initialize supertypes for all terms to start building portraits.
                     f"Assuming {self.source_term} is {answer_term}"
                 )
                 self.portrait.ancestor_anchors.add(supertype)
-            case _:
+            case EscapeHatch.WORD:
                 raise BouzygesError(
                     "Should not happen: null-like response from prompter; "
                     "did the Prompter inject the escape hatch?"
                 )
 
     async def populate_attribute_candidates(self) -> None:
-        attributes = self.snowstorm.get_attribute_suggestions(
-            self.portrait.ancestor_anchors
+        attributes: dict[SCTID, AttributeConstraints] = (
+            self.snowstorm.get_attribute_suggestions(
+                self.portrait.ancestor_anchors
+            )
         )
 
         # Remove previously rejected attributes
         for attribute in self.portrait.rejected_attributes:
             attributes.pop(attribute, None)
 
-        self.logger.debug("Possible attributes for: " + self.source_term)
+        possible_message = []
+        possible_message.append("Possible attributes for: " + self.source_term)
         for sctid, attribute in attributes.items():
-            self.logger.debug(f" - {sctid} {attribute.pt}")
+            possible_message.append(f" - {sctid} {attribute.pt}")
+        self.logger.debug("\n".join(possible_message))
 
         # Confirm the attributes
         for attribute in attributes.values():
-            accept = self.prompter.prompt_attr_presence(
+            accept: bool = await self.prompter.prompt_attr_presence(
                 term=self.source_term,
                 attribute=attribute.pt,
                 term_context="; ".join(self.portrait.context)
@@ -2921,8 +2916,8 @@ Initialize supertypes for all terms to start building portraits.
         for attribute in self.portrait.unchecked_attributes:
             self.logger.debug(f"Attribute: {attribute}")
             # Get possible attribute values
-            values_options = self.snowstorm.get_attribute_values(
-                self.portrait, attribute
+            values_options: dict[SCTID, SCTDescription] = (
+                self.snowstorm.get_attribute_values(self.portrait, attribute)
             )
             self.logger.debug(f"Values: {values_options}")
 
@@ -2931,12 +2926,20 @@ Initialize supertypes for all terms to start building portraits.
                 rejected.add(attribute)
                 continue
             else:
-                self.logger.info(f"Possible values for: {attribute}")
+                possible_message = []
+                possible_message.append(
+                    f"Possible values for {attribute} in {self.source_term}"
+                )
                 for value in values_options:
-                    self.logger.info(f" - {value}")
+                    possible_message.append(
+                        f" - {value} {values_options[value]}"
+                    )
+                self.logger.debug("\n".join(possible_message))
 
             # Prompt for the value
-            value_term = self.prompter.prompt_attr_value(
+            value_term: (
+                SCTDescription | EscapeHatch
+            ) = await self.prompter.prompt_attr_value(
                 term=self.source_term,
                 attribute=self.portrait.relevant_constraints[attribute].pt,
                 options=values_options.values(),
@@ -2982,7 +2985,9 @@ Update existing attribute values with the most precise descendant for all terms.
                 descriptions = {v: k for k, v in children.items()}
 
                 # Prompt for the most precise value
-                value_term = self.prompter.prompt_attr_value(
+                value_term: (
+                    SCTDescription | EscapeHatch
+                ) = await self.prompter.prompt_attr_value(
                     term=self.source_term,
                     attribute=self.portrait.relevant_constraints[attribute].pt,
                     options=descriptions,
@@ -3063,12 +3068,13 @@ otherwise.
                     if self.portrait.context
                     else None
                 )
-                if primitive and not self.prompter.prompt_subsumption(
-                    term=self.portrait.source_term,
-                    prospective_supertype=child_term,
-                    term_context=term_context,
-                ):
-                    self.portrait.rejected_supertypes.add(child_id)
+                if primitive:
+                    if not await self.prompter.prompt_subsumption(
+                        term=self.portrait.source_term,
+                        prospective_supertype=child_term,
+                        term_context=term_context,
+                    ):
+                        self.portrait.rejected_supertypes.add(child_id)
                     continue
 
                 new_anchors.add(child_id)
