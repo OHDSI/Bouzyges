@@ -125,6 +125,7 @@ LOGGER = logging.getLogger("Bouzyges")
 logging.basicConfig(level=logging.INFO)
 LOGGER.info("Logging started")
 # Default handler and formatter
+LOGGER.handlers.clear()
 _stdout_handler = logging.StreamHandler(sys.stdout)
 _formatter = logging.Formatter(
     "[%(asctime)s] %(levelname)s [%(name)s.%(funcName)s:%(lineno)d] "
