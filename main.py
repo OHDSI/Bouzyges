@@ -1343,7 +1343,14 @@ Interfaces prompts to the LLM agent and parses answers.
         self.cache: PromptCache | None = None
         self.logger = LOGGER.getChild(self.__class__.__name__)
         if PARAMS.api.cache_db is not None:
-            conn = sqlite3.connect(PARAMS.api.cache_db, check_same_thread=False)
+            try:
+                conn = sqlite3.connect(
+                    PARAMS.api.cache_db, check_same_thread=False
+                )
+            except Exception as e:
+                self.logger.error("Could not connect (create) to the cache DB")
+                raise PrompterInitError(e)
+
             self.cache = PromptCache(conn)
 
     @staticmethod
@@ -1877,9 +1884,14 @@ class SnowstormAPI:
         # Debug
         self.__start_time = datetime.datetime.now()
         self.logger = LOGGER.getChild(self.__class__.__name__)
-
         self.url: Url = url
-        self.branch_path: BranchPath = self.get_main_branch_path()
+
+        # Get the main branch path (and try connecting)
+        try:
+            self.branch_path: BranchPath = self.get_main_branch_path()
+        except Exception as e:
+            self.logger.error(f"Could not get branch from Snowstorm API: {e}")
+            raise
 
         # Cache repetitive queries
         self.__concepts_cache: dict[SCTID, Concept] = {}
@@ -1909,6 +1921,7 @@ raises an exception on non-200 responses.
         try:
             response = requests.get(*args, **kwargs)
         except requests.exceptions.RequestException as e:
+            self.logger.error(f"Could not connect to Snowstorm API: {e}")
             raise BouzygesError(f"Could not connect to Snowstorm API: {e}")
 
         if not response.ok:
@@ -2318,12 +2331,18 @@ Read the file
             "Tab": "\t",
         }
         encoded_sep = PARAMS.read.sep
-        df = pd.read_csv(
-            self.path,
-            dtype=str,
-            sep=decode_sep.get(encoded_sep, encoded_sep),
-            quotechar=PARAMS.read.quotechar,
-        )
+
+        try:
+            df = pd.read_csv(
+                self.path,
+                dtype=str,
+                sep=decode_sep.get(encoded_sep, encoded_sep),
+                quotechar=PARAMS.read.quotechar,
+            )
+        except Exception as e:
+            self.logger.error(f"Could not read {self.path}: {e}")
+            raise
+
         self.logger.info(f"Read {len(df)} rows from {self.path}")
         self.content = df
 
@@ -2413,14 +2432,19 @@ A class to write resulting files.
         self.logger.debug("Content ready")
 
         self.logger.info(f"Writing to {self.path}")
-        self.content.to_csv(
-            self.path,
-            index=False,
-            sep=PARAMS.write.sep,
-            quotechar=PARAMS.write.quotechar,
-            quoting=PARAMS.write.quoting,
-            na_rep="",
-        )
+
+        try:
+            self.content.to_csv(
+                self.path,
+                index=False,
+                sep=PARAMS.write.sep,
+                quotechar=PARAMS.write.quotechar,
+                quoting=PARAMS.write.quoting,
+                na_rep="",
+            )
+        except Exception as e:
+            self.logger.error(f"Could not write to {self.path}: {e}")
+            raise
 
         self.logger.info(f"Written to {self.path}")
 
@@ -2558,7 +2582,11 @@ JSON schema:
         self.logger.debug("Content ready")
 
         with open(self.path, "w") as f:
-            json.dump(self.content, f, indent=2)
+            try:
+                json.dump(self.content, f, indent=2)
+            except Exception as e:
+                self.logger.error(f"Could not write to {self.path}: {e}")
+                raise
 
         self.logger.info(f"Written to {self.path}")
 
@@ -2770,18 +2798,20 @@ Run the worker thread.
         self.snowstorm.remove_redundant_ancestors(self.portrait)
 
         # Log resulting supertypes
-        self.logger.info("Attributes:")
-        self.logger.info(f" - {self.source_term} attributes:")
+        attr_message = []
+        attr_message += [f"'{self.source_term}' Attributes:"]
         for attribute, value in self.portrait.attributes.items():
-            self.logger.info(f"   - {attribute} {value}")
+            attr_message.append(f" - {attribute}={value}")
+        self.logger.info("\n".join(attr_message))
 
-        self.logger.info(f"{self.source_term} supertypes:")
-
+        supr_message = []
+        supr_message += [f"'{self.source_term}' Supertypes:"]
         anchors: dict[SCTID, SCTDescription] = {}
         for anchor in self.portrait.ancestor_anchors:
             ancestor = self.snowstorm.get_concept(anchor)
-            self.logger.info(f" - {ancestor.sctid} {ancestor.pt}")
+            supr_message.append(f" - {ancestor.sctid} {ancestor.pt}")
             anchors[ancestor.sctid] = ancestor.pt
+        self.logger.info("\n".join(supr_message))
 
         return WrappedResult(self.portrait, anchors)
 
