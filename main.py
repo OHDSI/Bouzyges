@@ -1687,20 +1687,27 @@ A prompter that interfaces with the OpenAI API using.
                 f"Can not initialize {self} without OPENAI_API_KEY"
             )
 
-        self._client = openai.OpenAI()
+        self._client = openai.AsyncOpenAI()
         self._ping_headers = {}
+
+    async def _ping(self):
+        try:
+            return await self._client.models.list(
+                extra_headers=self._ping_headers, timeout=5
+            )
+        except Exception as e:
+            self.logger.warning(f"Connection timed out: {e}")
+            raise
 
     def ping(self) -> bool:
         self.logger.info("Pinging the OpenAI API...")
         # Ping by retrieving the list of models
         try:
-            models = self._client.models.list(
-                extra_headers=self._ping_headers, timeout=5
-            )
-
-        except openai.APITimeoutError:
-            self.logger.warning("Connection timed out")
+            models = asyncio.run(self._ping())
+        except Exception as e:
+            self.logger.warning(f"API is not available: {e}")
             return False
+
         response: dict = models.model_dump()
         success = response.get("data", []) != []
         if success:
@@ -1719,17 +1726,17 @@ A prompter that interfaces with the OpenAI API using.
         return False
 
     async def _prompt_bool_answer(self, prompt: Prompt) -> bool:
-        return self._prompt_answer(prompt, self.unwrap_bool_answer)
+        return await self._prompt_answer(prompt, self.unwrap_bool_answer)
 
     async def _prompt_class_answer(self, allow_escape, options, prompt):
-        return self._prompt_answer(
+        return await self._prompt_answer(
             prompt,
             lambda x: self.unwrap_class_answer(
                 x, options, EscapeHatch.WORD if allow_escape else None
             ),
         )
 
-    def _prompt_answer(
+    async def _prompt_answer(
         self, prompt: Prompt, parser: Callable[[str], T], parse_retries_left=3
     ) -> T:
         self.logger.info("Trying cache for answer...")
@@ -1772,7 +1779,7 @@ A prompter that interfaces with the OpenAI API using.
             messages = prompt.prompt_message
 
         try:
-            brain_answer = self._get_completion(
+            brain_answer = await self._get_completion(
                 messages=messages,  # type: ignore
                 **(prompt.api_options or {}),
             )
@@ -1803,22 +1810,21 @@ A prompter that interfaces with the OpenAI API using.
             self.cache_remember(prompt, response_message)
             return answer
         except PrompterError as e:
+            # Recursively call self if LLM fails to provide a parsable answer
             self.logger.error(f"Error parsing response: {e}")
             if parse_retries_left > 0:
                 self.logger.warning(
                     f"Retrying parsing the answer, "
                     f"attempts left: {parse_retries_left}"
                 )
-                return self._prompt_answer(
+                return await self._prompt_answer(
                     prompt, parser, parse_retries_left - 1
                 )
             raise PrompterError("Failed to parse the answer")
 
-    @tenacity.retry(
-        wait=tenacity.wait_random_exponential(multiplier=1, max=60),
-    )
-    def _get_completion(self, messages, **kwargs):
-        return self._client.chat.completions.create(
+    @tenacity.retry(wait=tenacity.wait_random_exponential(multiplier=1, max=60))
+    async def _get_completion(self, messages, **kwargs):
+        return await self._client.chat.completions.create(
             messages=messages,  # type: ignore
             model=self._model_id,
             **kwargs,
