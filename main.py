@@ -2664,8 +2664,10 @@ Main logic host for the Bouzyges system.
 
         self.logger = LOGGER.getChild(self.__class__.__name__)
 
+        self.results: list[WrappedResult] = []
+
     @staticmethod
-    async def read_file(logger, prep_dict) -> None:
+    async def read_file(logger, prep_dict, ready_callback) -> None:
         """\
 Read the input file and parse it into a list of SemanticPortrait objects.
 """
@@ -2680,9 +2682,10 @@ Read the input file and parse it into a list of SemanticPortrait objects.
         portraits = reader.parse()
         logger.info(f"Read {len(portraits)} portraits")
         prep_dict["portraits"] = portraits
+        ready_callback()
 
     @staticmethod
-    async def get_snowstorm(logger, prep_dict):
+    async def get_snowstorm(logger, prep_dict, ready_callback):
         """\
 Initialize the SnowstormAPI object.
 """
@@ -2693,9 +2696,10 @@ Initialize the SnowstormAPI object.
             logger.error("Could not connect to Snowstorm API:", e)
             raise
         prep_dict["snowstorm"] = snowstorm
+        ready_callback()
 
     @staticmethod
-    async def get_prompter(logger, prep_dict):
+    async def get_prompter(logger, prep_dict, ready_callback):
         logger.info("Initializing prompter...")
         prompter: Prompter
         match PARAMS.api.prompter:
@@ -2722,22 +2726,27 @@ Initialize the SnowstormAPI object.
                 raise ValueError("Invalid prompter option")
         prep_dict["prompter"] = prompter
         logger.info("Prompter initialized")
+        ready_callback()
 
     @classmethod
-    async def prepare(cls) -> Self:
+    async def prepare(cls, progress_callback) -> Self:
         logger = LOGGER.getChild(cls.__name__)
+        progress_callback(0, 3)
 
         prep_dict = {}
 
-        snowstorm_task = cls.get_snowstorm(logger, prep_dict)
-        prompter_task = cls.get_prompter(logger, prep_dict)
-        read_file_task = cls.read_file(logger, prep_dict)
+        def report_completion():
+            progress_callback(len(prep_dict), 3)
+
+        snowstorm_task = cls.get_snowstorm(logger, prep_dict, report_completion)
+        prompter_task = cls.get_prompter(logger, prep_dict, report_completion)
+        read_file_task = cls.read_file(logger, prep_dict, report_completion)
 
         await asyncio.gather(snowstorm_task, prompter_task, read_file_task)
 
         return cls(**prep_dict)
 
-    async def _run(self):
+    async def _run(self, progress_callback):
         """Main routine"""
         start_time = datetime.datetime.now()
         self.logger.info(f"Started at: {start_time}")
@@ -2747,7 +2756,15 @@ Initialize the SnowstormAPI object.
             for i, portrait in enumerate(self.portraits.values())
         ]
 
-        results = await asyncio.gather(*map(lambda w: w.run(), workers))
+        done: list[_BouzygesWorker] = []
+
+        def report_progress(worker: _BouzygesWorker):
+            done.append(worker)
+            progress_callback(len(done), len(workers))
+
+        self.results = await asyncio.gather(
+            *map(lambda w: w.run(report_progress), workers)
+        )
 
         self.logger.info("Routine finished")
         self.logger.info(
@@ -2755,27 +2772,27 @@ Initialize the SnowstormAPI object.
             f"{(datetime.datetime.now() - start_time).total_seconds()}"
         )
 
-        self.output(results)
-
-    def output(self, results: Iterable[WrappedResult]) -> None:
+    async def output(self, progress_callback) -> None:
         """\
 Output the results of the Bouzyges system.
 """
+        progress_callback(0, 1)
         if PARAMS.write.file is None:
             raise BouzygesError("No output file specified")
 
         out_path = os.path.join(PARAMS.out_dir, PARAMS.write.file)
         writer = FileWriter(out_path, format=PARAMS.format)
-        writer.write_chosen(results)
+        writer.write_chosen(self.results)
+        progress_callback(1, 1)
 
-    async def run(self):
+    async def run(self, progress_callback):
         """\
 Run the Bouzyges system.
 """
         if PARAMS.prof:
             with cProfile.Profile() as prof:
                 try:
-                    await self._run()
+                    await self._run(progress_callback)
                 except ProfileMark:
                     pass
                 finally:
@@ -2783,7 +2800,7 @@ Run the Bouzyges system.
                     stats.sort_stats(pstats.SortKey.TIME)
                     stats.dump_stats("stats.prof")
         else:
-            await self._run()
+            await self._run(progress_callback)
 
 
 class _BouzygesWorker:
@@ -2811,14 +2828,14 @@ source term.
 
         self.logger.info(f"Worker for '{self.source_term}' is ready")
 
-    async def run(self) -> WrappedResult:
+    async def run(self, report_progress) -> WrappedResult:
         """\
 Run the worker thread.
 """
         start_time = datetime.datetime.now()
         self.logger.info(f"Started at: {start_time}")
         try:
-            return await self._run()
+            return await self._run(report_progress)
         except Exception as e:
             self.logger.error(f"An error occurred: {e}")
             raise
@@ -2829,7 +2846,7 @@ Run the worker thread.
             )
             self.prompter.report_usage()
 
-    async def _run(self) -> WrappedResult:
+    async def _run(self, report_progress) -> WrappedResult:
         await self.initialize_supertypes()
         await self.populate_attribute_candidates()
         await self.populate_unchecked_attributes()
@@ -2864,6 +2881,7 @@ Run the worker thread.
         asyncio.gather(*map(get_anchor_info, self.portrait.ancestor_anchors))
         self.logger.info("\n".join(supr_message))
 
+        report_progress(self)
         return WrappedResult(self.portrait, anchors)
 
     async def initialize_supertypes(self):
@@ -3293,13 +3311,21 @@ Main window and start config for the Bouzyges system.
         self.io_container.setLayout(io_layout)
         right_quarter_layout.addWidget(self.io_container)
 
-        # Run button
+        # Run layout
         run_layout = QtWidgets.QHBoxLayout()
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.spin_bouzyges)
-        run_layout.addWidget(self.run_button)
-        right_quarter_layout.addLayout(run_layout)
+        self.run_status = QtWidgets.QLabel("Status: Ready")
+        self.run_status.setStyleSheet("font-weight: bold;")
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setDisabled(True)
 
+        run_layout.addWidget(self.run_button)
+        run_layout.addWidget(self.run_status)
+        run_layout.addWidget(self.progress_bar)
+        right_quarter_layout.addLayout(run_layout)
         # Logging space
         logging_layout = QtWidgets.QVBoxLayout()
         logging_subtitle = QtWidgets.QLabel("Run log")
@@ -3440,9 +3466,11 @@ Main window and start config for the Bouzyges system.
         bouzyges_capture: dict[Literal["success"], Bouzyges] = {}
         bouzyges: Bouzyges
 
-        async def prepare():
+        async def prepare(progress_callback):
             try:
-                bouzyges_capture["success"] = await Bouzyges.prepare()
+                bouzyges_capture["success"] = await Bouzyges.prepare(
+                    progress_callback=progress_callback
+                )
             except Exception as e:
                 self.logger.error(f"Could not prepare Bouzyges: {e}")
                 self.logger.error(
@@ -3456,6 +3484,8 @@ Main window and start config for the Bouzyges system.
         bouzyges = bouzyges_capture["success"]
         await self.__start_job("Bouzyges Run", bouzyges.run)
 
+        await self.__start_job("Bouzyges Output", bouzyges.output)
+
         self.reset_ui()
 
     def reset_ui(self) -> None:
@@ -3464,10 +3494,21 @@ Main window and start config for the Bouzyges system.
         self.options_container.setEnabled(True)
         self.io_container.setEnabled(True)
         self.run_button.setEnabled(True)
+        self.run_status.setText("Status: Ready")
+        self.progress_bar.setValue(0)
+        self.progress_bar.setEnabled(False)
+
+    def update_progress(self, value: int, max: int) -> None:
+        self.progress_bar.setRange(0, max)
+        self.progress_bar.setValue(value)
 
     async def __start_job(self, name: str, async_target, *args, **kwargs):
         self.logger.info(f"Starting {name} thread")
-        result = await async_target(*args, **kwargs)
+        self.run_status.setText(f"Status: {name}")
+        self.progress_bar.setEnabled(True)
+        result = await async_target(
+            *args, **kwargs, progress_callback=self.update_progress
+        )
         self.logger.info(f"{name} thread finished")
         return result
 
