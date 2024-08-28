@@ -32,6 +32,7 @@ import requests
 import tenacity
 import webbrowser
 from frozendict import frozendict
+import qasync
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 # Optional imports
@@ -3237,17 +3238,14 @@ class BouzygesWindow(QtWidgets.QMainWindow):
 Main window and start config for the Bouzyges system.
 """
 
-    def __init__(self, *args, **kwargs):
-        # Qt app
-        self.app = QtWidgets.QApplication(sys.argv)
-
+    def __init__(self, loop: asyncio.AbstractEventLoop, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.logger = LOGGER.getChild("GUI")
         self.setWindowTitle("OHDSI Bouzyges")
         self.setWindowIcon(QtGui.QIcon("icon.png"))
 
         layout = QtWidgets.QVBoxLayout()
-        self.populate_layout(layout)
+        self.__populate_layout(layout)
         widget = QtWidgets.QWidget()
         widget.setLayout(layout)
         self.setCentralWidget(widget)
@@ -3257,7 +3255,10 @@ Main window and start config for the Bouzyges system.
         if menubar is not None:
             self.populate_menu(menubar)
 
-    def populate_layout(self, layout):
+        # Async support
+        self.loop = loop
+
+    def __populate_layout(self, layout):
         self._verticalSpacer = QtWidgets.QSpacerItem(
             20,
             40,
@@ -3420,7 +3421,8 @@ Main window and start config for the Bouzyges system.
         if file:
             PARAMS.api.cache_db = file[0]
 
-    def spin_bouzyges(self) -> None:
+    @qasync.asyncSlot()
+    async def spin_bouzyges(self) -> None:
         # Adding a file handler to the logger
         if PARAMS.log.log_to_file:
             date_str = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -3449,10 +3451,10 @@ Main window and start config for the Bouzyges system.
                 self.reset_ui()
                 return
 
-        asyncio.run(self.__start_job("Bouzyges Preparation", prepare))
+        await self.__start_job("Bouzyges Preparation", prepare)
 
         bouzyges = bouzyges_capture["success"]
-        asyncio.run(self.__start_job("Bouzyges Run", bouzyges.run))
+        await self.__start_job("Bouzyges Run", bouzyges.run)
 
         self.reset_ui()
 
@@ -3465,23 +3467,9 @@ Main window and start config for the Bouzyges system.
 
     async def __start_job(self, name: str, async_target, *args, **kwargs):
         self.logger.info(f"Starting {name} thread")
-
-        done = {}
-
-        async def task_wrapper():
-            await async_target(*args, **kwargs)
-            done["name"] = True
-
-        async with asyncio.TaskGroup() as tg:
-            tg.create_task(task_wrapper())
-            tg.create_task(self.process_events(lambda: done.get("name", False)))
-
+        result = await async_target(*args, **kwargs)
         self.logger.info(f"{name} thread finished")
-
-    async def process_events(self, must_stop: Callable[[], bool]) -> None:
-        while not must_stop():
-            QtWidgets.QApplication.processEvents()
-            await asyncio.sleep(0.1)
+        return result
 
     def __populate_option_contents(self, layout) -> None:
         # Prompter choice:
@@ -3552,7 +3540,7 @@ Main window and start config for the Bouzyges system.
         prof_label.setStyleSheet("font-weight: bold;")
         prof_layout = QtWidgets.QHBoxLayout()
 
-        early_termination_label = QtWidgets.QLabel("Stop execution after (s):")
+        early_termination_label = QtWidgets.QLabel("Stop after (s):")
         early_termination_input = QtWidgets.QLineEdit()
         early_termination_input.setPlaceholderText("don't")
         if PARAMS.prof.stop_profiling_after_seconds is not None:
@@ -3774,10 +3762,14 @@ Main window and start config for the Bouzyges system.
 
 
 def main():
-    window = BouzygesWindow()
+    loop = qasync.QEventLoop()
+    asyncio.set_event_loop(loop)
+    window = BouzygesWindow(loop=loop)
     window.show()
-    sys.exit(window.app.exec())
+    with loop:
+        loop.run_forever()
 
 
 if __name__ == "__main__":
+    APP = qasync.QApplication(sys.argv)
     main()
