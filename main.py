@@ -1859,7 +1859,7 @@ A prompter that interfaces with the OpenAI API using Azure.
 
     def _init_client(self, api_key: str, azure_endpoint: str):
         self.logger.info("Initializing the Azure API client...")
-        self._client = openai.AzureOpenAI(
+        self._client = openai.AsyncAzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
             api_version=self.DEFAULT_VERSION,
