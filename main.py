@@ -853,6 +853,9 @@ Abstract class for formatting prompts for the LLM agent.
         f"matches the question, you must select it."
     )
 
+    def __init__(self):
+        self.logger = LOGGER.getChild("PromptFormat")
+
     @staticmethod
     def wrap_term(term: str) -> str:
         """Wrap a term in square brackets."""
@@ -1116,6 +1119,16 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         term_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
     ) -> Prompt:
+        if not options:
+            self.logger.error("No options provided for supertype prompt")
+            self.logger.debug(f"""Prompt context: {term_context}
+  - Term: {term}
+  - Options: {options}
+  - Allowed escape: {allow_escape}
+  - Term context: {term_context}
+  - Options context: {json.dumps(options_context)}""")
+            raise ValueError("No options provided for supertype prompt")
+
         prompt = self._form_shared_history(allow_escape)
         prompt.append(
             (
@@ -1873,19 +1886,50 @@ class SnowstormAPI:
         self.__start_time = datetime.datetime.now()
         self.logger = LOGGER.getChild(self.__class__.__name__)
         self.url: Url = url
-
-        # Get the main branch path (and try connecting)
-        try:
-            self.branch_path: BranchPath = self.get_main_branch_path()
-        except Exception as e:
-            self.logger.error(f"Could not get branch from Snowstorm API: {e}")
-            raise
+        self.mrcm_entries: list[MRCMDomainRefsetEntry] = []
 
         # Cache repetitive queries
         self.__concepts_cache: dict[SCTID, Concept] = {}
         self.__subsumptions_cache: dict[tuple[SCTID, SCTID], bool] = {}
 
-    def _get(self, *args, **kwargs) -> requests.Response:
+    @classmethod
+    async def init(cls, url: Url) -> SnowstormAPI:
+        snowstorm = cls(url)
+        await snowstorm.ping()
+
+        # Load MRCM entries
+        snowstorm.logger.info("Loading MRCM Domain Reference Set entries")
+        domain_entries = await snowstorm.get_mrcm_domain_reference_set_entries()
+        snowstorm.logger.info(f"Total entries: {len(domain_entries)}")
+        snowstorm.mrcm_entries = [
+            MRCMDomainRefsetEntry.from_json(entry)
+            for entry in domain_entries
+            if SCTID(entry["referencedComponent"]["conceptId"])
+            in WHITELISTED_SUPERTYPES
+        ]
+
+        entries_msg = ["MRCM entries:"]
+        for entry in snowstorm.mrcm_entries:
+            entries_msg.append(" - " + entry.term + ":")
+            entries_msg.append("    - " + entry.domain_constraint)
+            entries_msg.append("    - " + entry.guide_link)
+        snowstorm.logger.debug("\n".join(entries_msg))
+
+        return snowstorm
+
+    async def ping(self) -> bool:
+        # Get the main branch path (and try connecting)
+        try:
+            self.logger.info("Snowstorm Version: " + await self.get_version())
+            self.branch_path: BranchPath = await self.get_main_branch_path()
+        except Exception as e:
+            self.logger.error(f"Could not get branch from Snowstorm API: {e}")
+            raise
+        # Log the version
+        self.logger.info("Using branch path: " + self.branch_path)
+        return True
+
+    async def _get(self, *args, **kwargs) -> requests.Response:
         """\
 Wrapper for requests.get that prepends known url and
 raises an exception on non-200 responses.
@@ -1924,10 +1968,11 @@ raises an exception on non-200 responses.
 
         return response
 
-    def _get_collect(self, *args, **kwargs) -> list:
+    async def _get_collect(self, *args, **kwargs) -> list:
         """\
 Wrapper for requests.get that collects all items from a paginated response.
 """
+        # TODO: request multiple pages in parallel if possible
         total = None
         offset = 0
         step = self.PAGINATION_STEP
@@ -1938,7 +1983,7 @@ Wrapper for requests.get that collects all items from a paginated response.
             kwargs["params"]["offset"] = offset
             kwargs["params"]["limit"] = step
 
-            response = self._get(*args, **kwargs)
+            response = await self._get(*args, **kwargs)
 
             collected_items.extend(response.json()["items"])
             total = response.json()["total"]
@@ -1946,13 +1991,13 @@ Wrapper for requests.get that collects all items from a paginated response.
 
         return collected_items
 
-    def get_version(self) -> str:
-        response = self._get("version")
+    async def get_version(self) -> str:
+        response = await self._get("version")
         return response.json()["version"]
 
-    def get_main_branch_path(self) -> BranchPath:
+    async def get_main_branch_path(self) -> BranchPath:
         # Get codesystems and look for a target
-        response = self._get("codesystems")
+        response = await self._get("codesystems")
 
         for codesystem in response.json()["items"]:
             if codesystem["shortName"] == self.TARGET_CODESYSTEM:
@@ -1963,13 +2008,13 @@ Wrapper for requests.get that collects all items from a paginated response.
             f"Target codesystem {self.TARGET_CODESYSTEM} is not present"
         )
 
-    def get_concept(self, sctid: SCTID) -> Concept:
+    async def get_concept(self, sctid: SCTID) -> Concept:
         """\
 Get full concept information.
 """
         if sctid in self.__concepts_cache:
             return self.__concepts_cache[sctid]
-        response = self._get(
+        response = await self._get(
             url=f"browser/{self.branch_path}/concepts/{sctid}",
             params={"activeFilter": True},
         )
@@ -1977,23 +2022,21 @@ Get full concept information.
         self.__concepts_cache[sctid] = concept
         return concept
 
-    def get_branch_info(self) -> dict:
-        response = self._get(f"branches/{self.branch_path}")
+    async def get_branch_info(self) -> dict:
+        response = await self._get(f"branches/{self.branch_path}")
         return response.json()
 
-    def get_attribute_suggestions(
+    async def get_attribute_suggestions(
         self, parent_ids: Iterable[SCTID]
     ) -> dict[SCTID, AttributeConstraints]:
-        params = {
-            "parentIds": [*parent_ids],
-            "proximalPrimitiveModeling": True,  # Maybe?
-            # Filter post-coordination for now
-            "contentType": "ALL",
-        }
-
-        response = self._get(
+        response = await self._get(
             url="mrcm/" + self.branch_path + "/domain-attributes",
-            params=params,
+            params={
+                "parentIds": [*parent_ids],
+                "proximalPrimitiveModeling": True,  # Maybe?
+                # Filter post-coordination for now
+                "contentType": "ALL",
+            },
         )
 
         return {
@@ -2002,10 +2045,10 @@ Get full concept information.
             if SCTID(attr["id"]) != IS_A  # Exclude hierarchy
         }
 
-    def get_mrcm_domain_reference_set_entries(
+    async def get_mrcm_domain_reference_set_entries(
         self,
     ) -> list[dict]:
-        collected_items = self._get_collect(
+        collected_items = await self._get_collect(
             url=f"{self.branch_path}/members",
             params={
                 "referenceSet": MRCM_DOMAIN_REFERENCE_SET_ECL,
@@ -2075,12 +2118,12 @@ do
         self.logger.warning(f"No range constraint found for {attribute}")
         return {}
 
-    def get_concept_children(
+    async def get_concept_children(
         self,
         parent: SCTID,
         require_property: Mapping[str, JsonPrimitive] | None = None,
     ) -> dict[SCTID, SCTDescription]:
-        response = self._get(
+        response = await self._get(
             url=f"browser/{self.branch_path}" + f"/concepts/{parent}/children",
         )
 
@@ -2096,7 +2139,7 @@ do
 
         return children
 
-    def is_concept_descendant_of(
+    async def is_concept_descendant_of(
         self,
         child: SCTID,
         parent: SCTID,
@@ -2115,7 +2158,7 @@ Concept+Subtypes+and+Supertypes
         if (child, parent) in self.__subsumptions_cache:
             return self.__subsumptions_cache[(child, parent)]
 
-        response = self._get(
+        response = await self._get(
             url=f"{self.branch_path}/concepts/",
             params={
                 "ecl": f"<{parent}",  # Is a subtype of
@@ -2128,7 +2171,7 @@ Concept+Subtypes+and+Supertypes
         self.__subsumptions_cache[(child, parent)] = out  # Cache the result
         return out
 
-    def filter_bad_descendants(
+    async def filter_bad_descendants(
         self, children: Iterable[SCTID], bad_parents: Iterable[SCTID]
     ) -> set[SCTID]:
         """\
@@ -2149,11 +2192,12 @@ Filter out children that are descendants of bad parents and return the rest.
             return out
 
         # Batch request, because Snowstorm hates long urls
+        # TODO: Parallelize?
         for bad_batch in itertools.batched(
             bad_parents, self.MAX_BAD_PARENT_QUERY
         ):
             expression = " OR ".join(f"<{b_p}" for b_p in sorted(bad_batch))
-            actual_children = self._get_collect(
+            actual_children = await self._get_collect(
                 url=f"{self.branch_path}/concepts/",
                 params={
                     "activeFilter": True,
@@ -2168,40 +2212,50 @@ Filter out children that are descendants of bad parents and return the rest.
 
         return out
 
-    def is_attr_val_descendant_of(
+    async def is_attr_val_descendant_of(
         self, child: AttributeRelationship, parent: AttributeRelationship
     ) -> bool:
         """\
 Check if the child attribute-value pair is a subtype of the parent.
 """
-        attribute_is_child = self.is_concept_descendant_of(
-            child.attribute, parent.attribute
-        )
-        value_is_child = self.is_concept_descendant_of(
-            child.value, parent.value
-        )
-        return attribute_is_child and value_is_child
+        ANSWER = [False, False]
 
-    def remove_redundant_ancestors(self, portrait: SemanticPortrait) -> None:
+        async def check_attr():
+            ANSWER[0] = await self.is_concept_descendant_of(
+                child.attribute, parent.attribute
+            )
+
+        async def check_val():
+            ANSWER[1] = await self.is_concept_descendant_of(
+                child.value, parent.value
+            )
+
+        asyncio.gather(check_attr(), check_val())
+        return all(ANSWER)
+
+    async def remove_redundant_ancestors(
+        self, portrait: SemanticPortrait
+    ) -> None:
         """\
 Remove ancestors that are descendants of other ancestors.
 """
         redundant_ancestors = set()
-        for ancestor in portrait.ancestor_anchors:
-            if any(
-                self.is_concept_descendant_of(
-                    other, ancestor, self_is_parent=False
-                )
-                for other in portrait.ancestor_anchors
-            ):
+        ancestor_matrix = itertools.combinations(portrait.ancestor_anchors, 2)
+
+        async def check_pair(pair):
+            ancestor, other = pair
+            if await self.is_concept_descendant_of(other, ancestor):
                 redundant_ancestors.add(ancestor)
+
+        asyncio.gather(*map(check_pair, ancestor_matrix))
+
         portrait.ancestor_anchors -= redundant_ancestors
 
-    def get_concept_ppp(self, concept: SCTID) -> set[SCTID]:
+    async def get_concept_ppp(self, concept: SCTID) -> set[SCTID]:
         """\
 Get a concept's Proximal Primitive Parents
 """
-        response = self._get(
+        response = await self._get(
             f"{self.branch_path}/concepts/{concept}/normal-form",
         )
 
@@ -2210,17 +2264,19 @@ Get a concept's Proximal Primitive Parents
         concepts = map(SCTID, focus_concepts_string.split(" + "))
 
         out = set()
-        for concept in concepts:
-            concept_info = self.get_concept(concept)
+
+        async def process_concept(concept):
+            nonlocal out
+            concept_info = await self.get_concept(concept)
             if concept_info.defined:
-                # Recurse for defined concepts
-                out |= self.get_concept_ppp(concept)
+                out |= await self.get_concept_ppp(concept)
             else:
                 out.add(concept)
 
+        asyncio.gather(*map(process_concept, concepts))
         return out
 
-    def check_inferred_subsumption(
+    async def check_inferred_subsumption(
         self, parent_predicate: Concept, portrait: SemanticPortrait
     ) -> bool:
         """\
@@ -2239,15 +2295,24 @@ manually/with LLM.
 
         # To be considered eligible as a descendant, all the predicate's PPP
         # must be ancestors of at least one anchor
-        unmatched_predicate_ppp: set[SCTID] = self.get_concept_ppp(
+        unmatched_predicate_ppp: set[SCTID] = await self.get_concept_ppp(
             parent_predicate.sctid
         )
-        for anchor in portrait.ancestor_anchors:
-            matched_ppp: set[SCTID] = set()
-            for ppp in unmatched_predicate_ppp:
-                if self.is_concept_descendant_of(anchor, ppp):
-                    matched_ppp.add(ppp)
-            unmatched_predicate_ppp -= matched_ppp
+
+        async def check_anchor(anchor):
+            nonlocal unmatched_predicate_ppp
+            if not unmatched_predicate_ppp:
+                return
+            anchor_matched_ppp = set()
+
+            async def check_ppp(ppp):
+                if await self.is_concept_descendant_of(anchor, ppp):
+                    anchor_matched_ppp.add(ppp)
+
+            asyncio.gather(*map(check_ppp, unmatched_predicate_ppp))
+            unmatched_predicate_ppp -= anchor_matched_ppp
+
+        asyncio.gather(*map(check_anchor, portrait.ancestor_anchors))
 
         if unmatched_predicate_ppp:
             self.logger.debug(
@@ -2263,11 +2328,12 @@ manually/with LLM.
             unmatched_concept_relationships |= group.relationships
         unmatched_concept_relationships |= parent_predicate.ungrouped
 
+        # TODO: asyncify
         for av in portrait.attributes.items():
             p_rel = AttributeRelationship(*av)
             matched_attr: set[AttributeRelationship] = set()
             for c_rel in unmatched_concept_relationships:
-                if self.is_attr_val_descendant_of(p_rel, c_rel):
+                if await self.is_attr_val_descendant_of(p_rel, c_rel):
                     matched_attr.add(c_rel)
             unmatched_concept_relationships -= matched_attr
             if not unmatched_concept_relationships:
@@ -2597,29 +2663,11 @@ Main logic host for the Bouzyges system.
 
         self.logger = LOGGER.getChild(self.__class__.__name__)
 
-        self.logger.info("Snowstorm Version: " + snowstorm.get_version())
-        self.logger.info("Using branch path: " + snowstorm.branch_path)
-
-        # Load MRCM entries
-        self.logger.info("MRCM Domain Reference Set entries:")
-        domain_entries = snowstorm.get_mrcm_domain_reference_set_entries()
-        self.logger.info(f"Total entries: {len(domain_entries)}")
-        self.mrcm_entries = [
-            MRCMDomainRefsetEntry.from_json(entry)
-            for entry in domain_entries
-            if SCTID(entry["referencedComponent"]["conceptId"])
-            in WHITELISTED_SUPERTYPES
-        ]
-
-        for entry in self.mrcm_entries:
-            self.logger.info(" - " + entry.term + ":")
-            self.logger.info("    - " + entry.domain_constraint)
-            self.logger.info("    - " + entry.guide_link)
-
-    @classmethod
-    def prepare(cls, logger: logging.Logger) -> Self:
-        logger = logger.getChild(cls.__name__)
-
+    @staticmethod
+    async def read_file(logger, prep_dict) -> None:
+        """\
+Read the input file and parse it into a list of SemanticPortrait objects.
+"""
         # Read file for portraits
         if not PARAMS.read.file:
             raise BouzygesError("No input file specified!")
@@ -2629,14 +2677,25 @@ Main logic host for the Bouzyges system.
         if reader.content is None:
             raise BouzygesError("Could not read the input file")
         portraits = reader.parse()
+        logger.info(f"Read {len(portraits)} portraits")
+        prep_dict["portraits"] = portraits
 
-        snowstorm_endpoint = PARAMS.api.snowstorm_url
+    @staticmethod
+    async def get_snowstorm(logger, prep_dict):
+        """\
+Initialize the SnowstormAPI object.
+"""
+        logger.info("Initializing Snowstorm API...")
         try:
-            snowstorm = SnowstormAPI(snowstorm_endpoint)
-        except SnowstormAPIError as e:
+            snowstorm = await SnowstormAPI.init(PARAMS.api.snowstorm_url)
+        except Exception as e:
             logger.error("Could not connect to Snowstorm API:", e)
-            raise BouzygesError("Could not connect to Snowstorm API")
+            raise
+        prep_dict["snowstorm"] = snowstorm
 
+    @staticmethod
+    async def get_prompter(logger, prep_dict):
+        logger.info("Initializing prompter...")
         prompter: Prompter
         match PARAMS.api.prompter:
             case "openai":
@@ -2660,13 +2719,22 @@ Main logic host for the Bouzyges system.
 
             case _:
                 raise ValueError("Invalid prompter option")
+        prep_dict["prompter"] = prompter
+        logger.info("Prompter initialized")
 
-        bouzyges = cls(
-            snowstorm=snowstorm,
-            prompter=prompter,
-            portraits=portraits,
-        )
-        return bouzyges
+    @classmethod
+    async def prepare(cls) -> Self:
+        logger = LOGGER.getChild(cls.__name__)
+
+        prep_dict = {}
+
+        snowstorm_task = cls.get_snowstorm(logger, prep_dict)
+        prompter_task = cls.get_prompter(logger, prep_dict)
+        read_file_task = cls.read_file(logger, prep_dict)
+
+        await asyncio.gather(snowstorm_task, prompter_task, read_file_task)
+
+        return cls(**prep_dict)
 
     async def _run(self):
         """Main routine"""
@@ -2738,7 +2806,7 @@ source term.
         self.logger = bouzyges.logger.getChild(f"Worker {idx}:{term_abbrev}")
         self.snowstorm = bouzyges.snowstorm
         self.prompter = bouzyges.prompter
-        self.mrcm_entries = bouzyges.mrcm_entries
+        self.__mrcm_entries = bouzyges.snowstorm.mrcm_entries
 
         self.logger.info(f"Worker for '{self.source_term}' is ready")
 
@@ -2774,7 +2842,7 @@ Run the worker thread.
                 cycles += updated
             changes_made = bool(cycles)
 
-        self.snowstorm.remove_redundant_ancestors(self.portrait)
+        await self.snowstorm.remove_redundant_ancestors(self.portrait)
 
         # Log resulting supertypes
         attr_message = []
@@ -2786,10 +2854,13 @@ Run the worker thread.
         supr_message = []
         supr_message += [f"'{self.source_term}' Supertypes:"]
         anchors: dict[SCTID, SCTDescription] = {}
-        for anchor in self.portrait.ancestor_anchors:
-            ancestor = self.snowstorm.get_concept(anchor)
-            supr_message.append(f" - {ancestor.sctid} {ancestor.pt}")
-            anchors[ancestor.sctid] = ancestor.pt
+
+        async def get_anchor_info(anchor):
+            concept = await self.snowstorm.get_concept(anchor)
+            supr_message.append(f" - {concept.sctid} {concept.pt}")
+            anchors[concept.sctid] = concept.pt
+
+        asyncio.gather(*map(get_anchor_info, self.portrait.ancestor_anchors))
         self.logger.info("\n".join(supr_message))
 
         return WrappedResult(self.portrait, anchors)
@@ -2805,7 +2876,7 @@ Initialize supertypes for all terms to start building portraits.
             )
 
         supertypes_decode = {
-            entry.term: entry.sctid for entry in self.mrcm_entries
+            entry.term: entry.sctid for entry in self.__mrcm_entries
         }
         supertype_term: (
             SCTDescription | EscapeHatch
@@ -2831,10 +2902,10 @@ Initialize supertypes for all terms to start building portraits.
                 )
 
     async def populate_attribute_candidates(self) -> None:
-        attributes: dict[SCTID, AttributeConstraints] = (
-            self.snowstorm.get_attribute_suggestions(
-                self.portrait.ancestor_anchors
-            )
+        attributes: dict[
+            SCTID, AttributeConstraints
+        ] = await self.snowstorm.get_attribute_suggestions(
+            self.portrait.ancestor_anchors
         )
 
         # Remove previously rejected attributes
@@ -2935,7 +3006,7 @@ Update existing attribute values with the most precise descendant for all terms.
             new_attributes[attribute] = value
             while True:
                 # Get children of the current value
-                children = self.snowstorm.get_concept_children(
+                children = await self.snowstorm.get_concept_children(
                     new_attributes[attribute]
                 )
                 if not children:
@@ -2983,9 +3054,10 @@ single iteration. Return True if the parent anchors have changed, False
 otherwise.
 """
         new_anchors = set()
-        for anchor in self.portrait.ancestor_anchors:
+
+        async def process_anchor(anchor):
             # Get all immediate descendants
-            children = self.snowstorm.get_concept_children(anchor)
+            children = await self.snowstorm.get_concept_children(anchor)
             self.logger.debug(f"Filtering {len(children)} children of {anchor}")
 
             # Remove verbatim known ancestors
@@ -2993,7 +3065,7 @@ otherwise.
                 children.pop(known_ancestor, None)
 
             # Filter previously rejected ancestors including meta-ancestors
-            remaining = self.snowstorm.filter_bad_descendants(
+            remaining = await self.snowstorm.filter_bad_descendants(
                 children=children, bad_parents=self.portrait.rejected_supertypes
             )
 
@@ -3009,21 +3081,24 @@ otherwise.
 
             # Iterate over descendants and ask LLM/Snowstorm if to include them
             # to the new anchors
-            for child_id, child_term in children.items():
-                child_concept = self.snowstorm.get_concept(child_id)
+            async def process_child(child_item):
+                child_id, child_term = child_item
 
-                supertype: bool = self.snowstorm.check_inferred_subsumption(
-                    child_concept, self.portrait
+                child_concept = await self.snowstorm.get_concept(child_id)
+                supertype: bool = (
+                    await self.snowstorm.check_inferred_subsumption(
+                        child_concept, self.portrait
+                    )
                 )
 
                 if not supertype:
                     # This will prevent expensive re-queries on descendants
                     self.portrait.rejected_supertypes.add(child_id)
-                    continue
+                    return
 
                 # Primitive concepts must be confirmed by the LLM
                 primitive = not child_concept.defined
-                term_context = (
+                source_term_context = (
                     "; ".join(self.portrait.context)
                     if self.portrait.context
                     else None
@@ -3032,12 +3107,16 @@ otherwise.
                     if not await self.prompter.prompt_subsumption(
                         term=self.portrait.source_term,
                         prospective_supertype=child_term,
-                        term_context=term_context,
+                        term_context=source_term_context,
                     ):
                         self.portrait.rejected_supertypes.add(child_id)
-                    continue
+                    return
 
                 new_anchors.add(child_id)
+
+            asyncio.gather(*map(process_child, children.items()))
+
+        asyncio.gather(*map(process_anchor, self.portrait.ancestor_anchors))
 
         if not new_anchors:
             self.logger.debug("No new ancestors found")
@@ -3361,7 +3440,7 @@ Main window and start config for the Bouzyges system.
 
         async def prepare():
             try:
-                bouzyges_capture["success"] = Bouzyges.prepare(logger=LOGGER)
+                bouzyges_capture["success"] = await Bouzyges.prepare()
             except Exception as e:
                 self.logger.error(f"Could not prepare Bouzyges: {e}")
                 self.logger.error(
