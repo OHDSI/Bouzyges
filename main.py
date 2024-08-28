@@ -12,7 +12,6 @@ import pstats
 import re
 import sqlite3
 import sys
-import threading
 import unittest
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -58,10 +57,6 @@ except ImportError:
 
 
 # Boilerplate
-## Qt app
-app = QtWidgets.QApplication(sys.argv)
-
-
 ## Typing
 class BranchPath(str):
     """Snowstorm working branch"""
@@ -2673,7 +2668,7 @@ Main logic host for the Bouzyges system.
         )
         return bouzyges
 
-    def _run(self):
+    async def _run(self):
         """Main routine"""
         start_time = datetime.datetime.now()
         self.logger.info(f"Started at: {start_time}")
@@ -2683,11 +2678,7 @@ Main logic host for the Bouzyges system.
             for i, portrait in enumerate(self.portraits.values())
         ]
 
-        async def run_all_workers():
-            coroutines = [worker.run() for worker in workers]
-            return await asyncio.gather(*coroutines)
-
-        results = asyncio.run(run_all_workers())
+        results = await asyncio.gather(*map(lambda w: w.run(), workers))
 
         self.logger.info("Routine finished")
         self.logger.info(
@@ -2708,14 +2699,14 @@ Output the results of the Bouzyges system.
         writer = FileWriter(out_path, format=PARAMS.format)
         writer.write_chosen(results)
 
-    def run(self):
+    async def run(self):
         """\
 Run the Bouzyges system.
 """
         if PARAMS.prof:
             with cProfile.Profile() as prof:
                 try:
-                    self._run()
+                    await self._run()
                 except ProfileMark:
                     pass
                 finally:
@@ -2723,7 +2714,7 @@ Run the Bouzyges system.
                     stats.sort_stats(pstats.SortKey.TIME)
                     stats.dump_stats("stats.prof")
         else:
-            self._run()
+            await self._run()
 
 
 class _BouzygesWorker:
@@ -3168,8 +3159,10 @@ Main window and start config for the Bouzyges system.
 """
 
     def __init__(self, *args, **kwargs):
+        # Qt app
+        self.app = QtWidgets.QApplication(sys.argv)
+
         super().__init__(*args, **kwargs)
-        self._bouzyges_subthread: threading.Thread | None = None
         self.logger = LOGGER.getChild("GUI")
         self.setWindowTitle("OHDSI Bouzyges")
         self.setWindowIcon(QtGui.QIcon("icon.png"))
@@ -3358,33 +3351,30 @@ Main window and start config for the Bouzyges system.
             file_handler.setFormatter(_formatter)
 
             LOGGER.addHandler(file_handler)
-
-        bouzyges_capture: dict[str, Bouzyges] = {}
-
-        def get_bouzyges():
-            try:
-                bouzyges_capture["success"] = Bouzyges.prepare(
-                    logger=LOGGER,
-                )
-            except Exception as e:
-                self.logger.error(f"Could not prepare Bouzyges: {e}")
-                raise
+            self.logger.info(f"Now logging to file: {log_file}")
 
         self.options_container.setEnabled(False)
         self.io_container.setEnabled(False)
         self.run_button.setEnabled(False)
+        bouzyges_capture: dict[Literal["success"], Bouzyges] = {}
+        bouzyges: Bouzyges
 
-        self.__start_subthread("Bouzyges Preparation", get_bouzyges)
+        async def prepare():
+            try:
+                bouzyges_capture["success"] = Bouzyges.prepare(logger=LOGGER)
+            except Exception as e:
+                self.logger.error(f"Could not prepare Bouzyges: {e}")
+                self.logger.error(
+                    "Could not prepare Bouzyges. Check the configuration."
+                )
+                self.reset_ui()
+                return
 
-        if not bouzyges_capture.get("success"):
-            self.logger.error(
-                "Could not prepare Bouzyges. Check the configuration."
-            )
-            self.reset_ui()
-            return
+        asyncio.run(self.__start_job("Bouzyges Preparation", prepare))
+
         bouzyges = bouzyges_capture["success"]
+        asyncio.run(self.__start_job("Bouzyges Run", bouzyges.run))
 
-        self.__start_subthread("Bouzyges Run", bouzyges.run)
         self.reset_ui()
 
     def reset_ui(self) -> None:
@@ -3394,29 +3384,25 @@ Main window and start config for the Bouzyges system.
         self.io_container.setEnabled(True)
         self.run_button.setEnabled(True)
 
-    def __start_subthread(self, name: str, target: Callable, *args, **kwargs):
-        if self._bouzyges_subthread:
-            self.logger.error("A Bouzyges thread is already running")
-            raise RuntimeError("A Bouzyges thread is already running")
-
-        self._bouzyges_subthread = threading.Thread(
-            *args, target=target, **kwargs
-        )
-        self._bouzyges_subthread.daemon = True
+    async def __start_job(self, name: str, async_target, *args, **kwargs):
         self.logger.info(f"Starting {name} thread")
-        self._bouzyges_subthread.start()
-        while self._bouzyges_subthread.is_alive():
-            QtWidgets.QApplication.processEvents()
-        self.logger.info(f"{name} thread finished")
-        self._bouzyges_subthread.join()
-        self._bouzyges_subthread = None
 
-    def stop_bouzyges(self) -> None:
-        if self._bouzyges_subthread:
-            self.logger.warning("Stopping Bouzyges thread")
-            sys.exit(1)
-        else:
-            self.logger.error("No Bouzyges thread to stop")
+        done = {}
+
+        async def task_wrapper():
+            await async_target(*args, **kwargs)
+            done["name"] = True
+
+        async with asyncio.TaskGroup() as tg:
+            tg.create_task(task_wrapper())
+            tg.create_task(self.process_events(lambda: done.get("name", False)))
+
+        self.logger.info(f"{name} thread finished")
+
+    async def process_events(self, must_stop: Callable[[], bool]) -> None:
+        while not must_stop():
+            QtWidgets.QApplication.processEvents()
+            await asyncio.sleep(0.1)
 
     def __populate_option_contents(self, layout) -> None:
         # Prompter choice:
@@ -3711,7 +3697,7 @@ Main window and start config for the Bouzyges system.
 def main():
     window = BouzygesWindow()
     window.show()
-    sys.exit(app.exec())
+    sys.exit(window.app.exec())
 
 
 if __name__ == "__main__":
