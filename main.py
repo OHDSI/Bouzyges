@@ -25,10 +25,10 @@ from typing import (
     TypeVar,
 )
 
+import httpx
 import openai
 import pandas as pd
 import pydantic
-import requests
 import tenacity
 import webbrowser
 from frozendict import frozendict
@@ -1930,7 +1930,7 @@ class SnowstormAPI:
         self.logger.info("Using branch path: " + self.branch_path)
         return True
 
-    async def _get(self, *args, **kwargs) -> requests.Response:
+    async def _get(self, *args, **kwargs) -> httpx.Response:
         """\
 Wrapper for requests.get that prepends known url and
 raises an exception on non-200 responses.
@@ -1952,15 +1952,15 @@ raises an exception on non-200 responses.
         kwargs["headers"]["Accept"] = "application/json"
 
         try:
-            response = requests.get(*args, **kwargs)
-        except requests.exceptions.RequestException as e:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(*args, **kwargs)
+        except Exception as e:
             self.logger.error(f"Could not connect to Snowstorm API: {e}")
             raise BouzygesError(f"Could not connect to Snowstorm API: {e}")
 
-        if not response.ok:
+        if not response.status_code < 400:
             self.logger.error(
-                f"Request failed: {response.status_code} {response.reason} "
-                f"for {response.url}"
+                f"Request failed: {response.status_code} for {response.url}"
             )
             self.logger.error(
                 f"Response: {json.dumps(response.json(), indent=2)}"
@@ -3497,10 +3497,13 @@ Main window and start config for the Bouzyges system.
         self.run_status.setText("Status: Ready")
         self.progress_bar.setValue(0)
         self.progress_bar.setEnabled(False)
+        self.progress_bar.setTextVisible(False)
 
     def update_progress(self, value: int, max: int) -> None:
         self.progress_bar.setRange(0, max)
         self.progress_bar.setValue(value)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setFormat(f"{value}/{max}")
 
     async def __start_job(self, name: str, async_target, *args, **kwargs):
         self.logger.info(f"Starting {name} thread")
