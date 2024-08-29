@@ -7,6 +7,7 @@ import datetime
 import itertools
 import json
 import logging
+import math
 import os
 import pstats
 import re
@@ -14,15 +15,20 @@ import sqlite3
 import sys
 import unittest
 from abc import ABC, abstractmethod
+from collections import Counter
 from dataclasses import dataclass
+from functools import wraps
 from typing import (
+    Any,
     Callable,
+    Coroutine,
     Iterable,
     Literal,
     Mapping,
     Self,
     TypeAlias,
     TypeVar,
+    Union,
 )
 
 import httpx
@@ -183,6 +189,7 @@ Parameters to control the interface to Snowstorm, cache and LLMs.
 """
 
     prompter: PrompterOption
+    repeat_prompts: int | None
     snowstorm_url: Url
     llm_model_id: str
     cache_db: str | None
@@ -340,8 +347,13 @@ IS_A = SCTID(116680003)
 ### SNOMED root concept
 ROOT_CONCEPT = SCTID(138875005)
 
+
 ### Temporary substitute for reading from a file
 TERMS = ["Pyogenic abscess of liver", "Invasive lobular carcinoma of breast"]
+
+
+### Default prompt repetition count
+DEFAULT_REPEAT_PROMPTS: int | None = 3
 
 
 ## Dataclasses
@@ -738,10 +750,14 @@ tokens.
         """
         exists = self.connection.execute(table_exists_query, [self.table_name])
         if not exists.fetchone():
+            self.logger.info("Creating prompt cache table")
             with open("init_prompt_cache.sql") as f:
                 self.connection.executescript(f.read())
+                self.connection.commit()
+        else:
+            self.logger.info("Existing prompt table already exists")
 
-    def get(self, model: str, prompt: Prompt) -> str | None:
+    def get(self, model: str, prompt: Prompt, attempt: int) -> str | None:
         """\
 Get the answer from the cache for specified model.
 """
@@ -752,6 +768,7 @@ Get the answer from the cache for specified model.
             SELECT response
             FROM {self.table_name}
             WHERE
+                attempt = ? AND
                 model = ? AND
                 prompt_text = ? AND
                 prompt_is_json = ? AND
@@ -762,7 +779,7 @@ Get the answer from the cache for specified model.
             cursor = self.connection.cursor()
             cursor.execute(
                 query,
-                (model, *prompt_dict.values()),
+                (attempt, model, *prompt_dict.values()),
             )
             if answer := cursor.fetchone():
                 return answer[0]
@@ -774,19 +791,22 @@ Get the answer from the cache for specified model.
             )
             return None
 
-    def remember(self, model: str, prompt: Prompt, response: str) -> None:
+    def remember(
+        self, model: str, prompt: Prompt, response: str, attempt: int
+    ) -> None:
         """\
 Remember the answer for the prompt for the specified model.
 """
         query = f"""
             INSERT INTO {self.table_name} (
+                attempt,
                 model,
                 prompt_text,
                 prompt_is_json,
                 api_options,
                 response
             )
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?)
         """
         # Convert prompt to serializable format
         prompt_dict = prompt.to_json()
@@ -795,6 +815,7 @@ Remember the answer for the prompt for the specified model.
         cursor.execute(
             query,
             (
+                attempt,
                 model,
                 *prompt_dict.values(),
                 response,
@@ -1333,12 +1354,42 @@ Outputs prompts as JSONs and contains sensible API option defaults.
 
 
 ## Logic prompter classes
+### Decorators
+AttemptCount = int
+PromptAnswerT = TypeVar(
+    "PromptAnswerT", bool, Union[SCTDescription, EscapeHatch]
+)
+
+
+def ask_many(method: Callable[..., Coroutine[Any, Any, PromptAnswerT]]):
+    """\
+Decorator for methods that require prompting. Will repeat the prompt until
+enough correct answers are received.
+"""
+
+    @wraps(method)
+    async def wrapper(self, *args, **kwargs) -> PromptAnswerT:
+        attempt = 1
+        winning_attempts = math.ceil(self.min_attempts / 2)
+        options_count: Counter[SCTDescription | bool | EscapeHatch] = Counter()
+        kwargs["attempt"] = attempt
+        while True:
+            answer = await method(self, *args, **kwargs)
+            options_count.update([answer])
+            if options_count[answer] >= winning_attempts:
+                return answer
+
+    return wrapper
+
+
+### Prompters
 class Prompter(ABC):
     """\
 Interfaces prompts to the LLM agent and parses answers.
 """
 
-    _model_id: str
+    _model_id: str = "UNKNOWN"
+    min_attempts: int = DEFAULT_REPEAT_PROMPTS
 
     def __init__(
         self,
@@ -1444,6 +1495,7 @@ Check if the answer contains a yes or no option.
                 "Could not find an unambiguous boolean answer in the response"
             )
 
+    @ask_many
     async def prompt_supertype(
         self,
         term: str,
@@ -1451,6 +1503,7 @@ Check if the answer contains a yes or no option.
         allow_escape: bool = True,
         term_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
+        attempt: int = 1,
     ) -> SCTDescription | EscapeHatch:
         """\
 Prompt the model to choose the best matching proximal ancestor for a term.
@@ -1460,8 +1513,9 @@ Prompt the model to choose the best matching proximal ancestor for a term.
             term, options, allow_escape, term_context, options_context
         )
         self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
+        self.logger.debug(f"Getting answer #{attempt}")
 
-        if cached_answer := self.cache_get(prompt):
+        if cached_answer := self.cache_get(prompt, attempt):
             answer = self.unwrap_class_answer(
                 cached_answer,
                 options,
@@ -1470,32 +1524,37 @@ Prompt the model to choose the best matching proximal ancestor for a term.
         else:
             # Get the answer
             answer = await self._prompt_class_answer(
-                allow_escape, options, prompt
+                allow_escape, options, prompt, attempt
             )
         self.logger.info(f"Agent answer: {answer} is a supertype of {term}")
         return answer
 
+    @ask_many
     async def prompt_attr_presence(
         self,
         term: str,
         attribute: SCTDescription,
         term_context: str | None = None,
         attribute_context: str | None = None,
+        attempt: int = 1,
     ) -> bool:
         prompt: Prompt = self.prompt_format.form_attr_presence(
             term, attribute, term_context, attribute_context
         )
+        self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
+        self.logger.debug(f"Getting answer #{attempt}")
 
-        if cached_answer := self.cache_get(prompt):
+        if cached_answer := self.cache_get(prompt, attempt):
             answer = self.unwrap_bool_answer(cached_answer)
         else:
-            answer = await self._prompt_bool_answer(prompt)
+            answer = await self._prompt_bool_answer(prompt, attempt)
         self.logger.info(
             f"Agent answer: The attribute '{attribute}' is "
             f"{'present' if answer else 'absent'} in '{term}'"
         )
         return answer
 
+    @ask_many
     async def prompt_attr_value(
         self,
         term: str,
@@ -1505,7 +1564,11 @@ Prompt the model to choose the best matching proximal ancestor for a term.
         attribute_context: str | None = None,
         options_context: dict[SCTDescription, str] | None = None,
         allow_escape: bool = True,
+        attempt: int = 1,
     ) -> SCTDescription | EscapeHatch:
+        """\
+Prompt the model to choose the value of an attribute in a term.
+"""
         prompt: Prompt = self.prompt_format.form_attr_value(
             term,
             attribute,
@@ -1515,11 +1578,10 @@ Prompt the model to choose the best matching proximal ancestor for a term.
             options_context,
             allow_escape,
         )
-        """\
-Prompt the model to choose the value of an attribute in a term.
-"""
+        self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
+        self.logger.debug(f"Getting answer #{attempt}")
 
-        if cached_answer := self.cache_get(prompt):
+        if cached_answer := self.cache_get(prompt, attempt):
             answer = self.unwrap_class_answer(
                 cached_answer,
                 options,
@@ -1527,7 +1589,7 @@ Prompt the model to choose the value of an attribute in a term.
             )
         else:
             answer = await self._prompt_class_answer(
-                allow_escape, options, prompt
+                allow_escape, options, prompt, attempt
             )
 
         self.logger.info(
@@ -1536,12 +1598,14 @@ Prompt the model to choose the value of an attribute in a term.
         )
         return answer
 
+    @ask_many
     async def prompt_subsumption(
         self,
         term: str,
         prospective_supertype: SCTDescription,
         term_context: str | None = None,
         supertype_context: str | None = None,
+        attempt: int = 1,
     ) -> bool:
         """\
 Prompt the model to decide if a term is a subtype of a prospective supertype.
@@ -1552,11 +1616,13 @@ Fully Defined concepts.
         prompt: Prompt = self.prompt_format.form_subsumption(
             term, prospective_supertype, term_context, supertype_context
         )
+        self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
+        self.logger.debug(f"Getting answer #{attempt}")
 
-        if cached_answer := self.cache_get(prompt):
+        if cached_answer := self.cache_get(prompt, attempt):
             answer = self.unwrap_bool_answer(cached_answer)
         else:
-            answer = await self._prompt_bool_answer(prompt)
+            answer = await self._prompt_bool_answer(prompt, attempt)
 
         self.logger.info(
             f"From cache: The term '{term}' is "
@@ -1565,18 +1631,20 @@ Fully Defined concepts.
         )
         return answer
 
-    def cache_remember(self, prompt: Prompt, answer: str) -> None:
+    def cache_remember(self, prompt: Prompt, answer: str, attempt: int) -> None:
         if self.cache:
-            self.cache.remember(self._model_id, prompt, answer)
+            self.cache.remember(self._model_id, prompt, answer, attempt)
 
-    def cache_get(self, prompt: Prompt) -> str | None:
+    def cache_get(self, prompt: Prompt, attempt: int) -> str | None:
         if self.cache:
-            return self.cache.get(self._model_id, prompt)
+            return self.cache.get(self._model_id, prompt, attempt)
         return None
 
     # Following methods are abstract and represent common queries to the model
     @abstractmethod
-    async def _prompt_bool_answer(self, prompt: Prompt) -> bool:
+    async def _prompt_bool_answer(
+        self, prompt: Prompt, record_attempt: int
+    ) -> bool:
         """\
 Send a prompt to the counterpart agent to obtain the answer
 """
@@ -1587,6 +1655,7 @@ Send a prompt to the counterpart agent to obtain the answer
         allow_escape: bool,
         options: Iterable[SCTDescription],
         prompt: Prompt,
+        record_attempt: int,
     ) -> SCTDescription | EscapeHatch:
         """\
 Send a prompt to the counterpart agent to obtain a single choice answer.
@@ -1613,12 +1682,16 @@ A test prompter that interacts with a human to get answers.
 """
 
     _model_id = "human"
+    # Only ask the human once
+    min_attempts = 1
 
     def __init__(self, *args, prompt_function: Callable[[str], str], **kwargs):
         super().__init__(*args, **kwargs)
         self.prompt_function = prompt_function
 
-    async def _prompt_class_answer(self, allow_escape, options, prompt):
+    async def _prompt_class_answer(
+        self, allow_escape, options, prompt, record_attempt
+    ):
         while True:
             brain_answer = self.prompt_function("Answer: ").strip()
             try:
@@ -1627,18 +1700,20 @@ A test prompter that interacts with a human to get answers.
                     options,
                     EscapeHatch.WORD if allow_escape else None,
                 )
-                self.cache_remember(prompt, brain_answer)
+                self.cache_remember(prompt, brain_answer, record_attempt)
                 return answer
 
             except PrompterError as e:
                 logging.error("Error: %s", e)
 
-    async def _prompt_bool_answer(self, prompt: Prompt) -> bool:
+    async def _prompt_bool_answer(
+        self, prompt: Prompt, record_attempt: int
+    ) -> bool:
         while True:
             brain_answer = self.prompt_function("Answer: ").strip()
             try:
                 answer = self.unwrap_bool_answer(brain_answer)
-                self.cache_remember(prompt, brain_answer)
+                self.cache_remember(prompt, brain_answer, record_attempt)
                 return answer
             except PrompterError as e:
                 logging.error("Error: %s", e)
@@ -1662,6 +1737,7 @@ A prompter that interfaces with the OpenAI API using.
     def __init__(
         self,
         *args,
+        repeat_prompts: int | None = None,
         model: str,
         **kwargs,
     ):
@@ -1669,6 +1745,9 @@ A prompter that interfaces with the OpenAI API using.
 
         self._model_id = model
         self._init_client(*args, **kwargs)
+
+        if repeat_prompts is not None:
+            self.min_attempts = repeat_prompts
 
         self._estimated_token_usage: dict[Prompt, int] = {}
         self._actual_token_usage: dict[Prompt, int] = {}
@@ -1734,22 +1813,33 @@ A prompter that interfaces with the OpenAI API using.
         self.logger.warning("API is not available")
         return False
 
-    async def _prompt_bool_answer(self, prompt: Prompt) -> bool:
-        return await self._prompt_answer(prompt, self.unwrap_bool_answer)
+    async def _prompt_bool_answer(
+        self, prompt: Prompt, record_attempt: int
+    ) -> bool:
+        return await self._prompt_answer(
+            prompt, self.unwrap_bool_answer, record_attempt
+        )
 
-    async def _prompt_class_answer(self, allow_escape, options, prompt):
+    async def _prompt_class_answer(
+        self, allow_escape, options, prompt, record_attempt
+    ):
         return await self._prompt_answer(
             prompt,
             lambda x: self.unwrap_class_answer(
                 x, options, EscapeHatch.WORD if allow_escape else None
             ),
+            record_attempt,
         )
 
     async def _prompt_answer(
-        self, prompt: Prompt, parser: Callable[[str], T], parse_retries_left=3
+        self,
+        prompt: Prompt,
+        parser: Callable[[str], T],
+        attempt,
+        parse_retries_left=3,
     ) -> T:
         self.logger.info("Trying cache for answer...")
-        if cached_answer := self.cache_get(prompt):
+        if cached_answer := self.cache_get(prompt, attempt):
             answer = parser(cached_answer)
             self.logger.info("Cache hit!")
             return answer
@@ -1816,7 +1906,7 @@ A prompter that interfaces with the OpenAI API using.
         self.logger.debug(f"Literal response: {response_message}")
         try:
             answer = parser(response_message)
-            self.cache_remember(prompt, response_message)
+            self.cache_remember(prompt, response_message, attempt)
             return answer
         except PrompterError as e:
             # Recursively call self if LLM fails to provide a parsable answer
@@ -1827,7 +1917,7 @@ A prompter that interfaces with the OpenAI API using.
                     f"attempts left: {parse_retries_left}"
                 )
                 return await self._prompt_answer(
-                    prompt, parser, parse_retries_left - 1
+                    prompt, parser, attempt, parse_retries_left - 1
                 )
             raise PrompterError("Failed to parse the answer")
 
@@ -2701,17 +2791,24 @@ Initialize the SnowstormAPI object.
     @staticmethod
     async def get_prompter(logger, prep_dict, ready_callback):
         logger.info("Initializing prompter...")
+        repeat_prompts = (
+            DEFAULT_REPEAT_PROMPTS
+            if PARAMS.api.repeat_prompts is None
+            else PARAMS.api.repeat_prompts
+        )
         prompter: Prompter
         match PARAMS.api.prompter:
             case "openai":
                 prompter = OpenAIPrompter(
                     prompt_format=OpenAIPromptFormat(),
+                    repeat_prompts=repeat_prompts,
                     model=PARAMS.api.llm_model_id,
                 )
 
             case "azure":
                 prompter = OpenAIAzurePrompter(
                     prompt_format=OpenAIPromptFormat(),
+                    repeat_prompts=repeat_prompts,
                     api_key=PARAMS.env.AZURE_API_KEY,
                     azure_endpoint=PARAMS.env.AZURE_API_ENDPOINT,
                     model=PARAMS.api.llm_model_id,
@@ -2746,7 +2843,7 @@ Initialize the SnowstormAPI object.
 
         return cls(**prep_dict)
 
-    async def _run(self, progress_callback):
+    async def _run(self, progress_callback) -> bool:
         """Main routine"""
         start_time = datetime.datetime.now()
         self.logger.info(f"Started at: {start_time}")
@@ -2762,15 +2859,21 @@ Initialize the SnowstormAPI object.
             done.append(worker)
             progress_callback(len(done), len(workers))
 
-        self.results = await asyncio.gather(
-            *map(lambda w: w.run(report_progress), workers)
-        )
+        try:
+            self.results = await asyncio.gather(
+                *map(lambda w: w.run(report_progress), workers)
+            )
+        except Exception as e:
+            self.logger.error(f"An error occurred: {e}")
+            return False
 
         self.logger.info("Routine finished")
         self.logger.info(
             f"Time taken (s): "
             f"{(datetime.datetime.now() - start_time).total_seconds()}"
         )
+
+        return True
 
     async def output(self, progress_callback) -> None:
         """\
@@ -2785,22 +2888,22 @@ Output the results of the Bouzyges system.
         writer.write_chosen(self.results)
         progress_callback(1, 1)
 
-    async def run(self, progress_callback):
+    async def run(self, progress_callback) -> bool:
         """\
 Run the Bouzyges system.
 """
         if PARAMS.prof:
             with cProfile.Profile() as prof:
                 try:
-                    await self._run(progress_callback)
+                    return await self._run(progress_callback)
                 except ProfileMark:
-                    pass
+                    return True
                 finally:
                     stats = pstats.Stats(prof)
                     stats.sort_stats(pstats.SortKey.TIME)
                     stats.dump_stats("stats.prof")
         else:
-            await self._run(progress_callback)
+            return await self._run(progress_callback)
 
 
 class _BouzygesWorker:
@@ -2897,15 +3000,11 @@ Initialize supertypes for all terms to start building portraits.
         supertypes_decode = {
             entry.term: entry.sctid for entry in self.__mrcm_entries
         }
-        supertype_term: (
-            SCTDescription | EscapeHatch
-        ) = await self.prompter.prompt_supertype(
-            term=self.source_term,
-            options=supertypes_decode,
-            allow_escape=False,
-            term_context="; ".join(self.portrait.context)
-            if self.portrait.context
-            else None,
+        supertype_term = await self.prompter.prompt_supertype(
+            self.source_term,
+            supertypes_decode,
+            False,
+            "; ".join(self.portrait.context) if self.portrait.context else None,
         )
         match supertype_term:
             case SCTDescription(answer_term):
@@ -2940,9 +3039,9 @@ Initialize supertypes for all terms to start building portraits.
         # Confirm the attributes
         for attribute in attributes.values():
             accept: bool = await self.prompter.prompt_attr_presence(
-                term=self.source_term,
-                attribute=attribute.pt,
-                term_context="; ".join(self.portrait.context)
+                self.source_term,
+                attribute.pt,
+                "; ".join(self.portrait.context)
                 if self.portrait.context
                 else None,
             )
@@ -2990,10 +3089,10 @@ Initialize supertypes for all terms to start building portraits.
             value_term: (
                 SCTDescription | EscapeHatch
             ) = await self.prompter.prompt_attr_value(
-                term=self.source_term,
-                attribute=self.portrait.relevant_constraints[attribute].pt,
-                options=values_options.values(),
-                term_context="; ".join(self.portrait.context)
+                self.source_term,
+                self.portrait.relevant_constraints[attribute].pt,
+                values_options.values(),
+                "; ".join(self.portrait.context)
                 if self.portrait.context
                 else None,
                 allow_escape=True,
@@ -3038,7 +3137,7 @@ Update existing attribute values with the most precise descendant for all terms.
                 value_term: (
                     SCTDescription | EscapeHatch
                 ) = await self.prompter.prompt_attr_value(
-                    term=self.source_term,
+                    self.source_term,
                     attribute=self.portrait.relevant_constraints[attribute].pt,
                     options=descriptions,
                     term_context="; ".join(self.portrait.context)
@@ -3124,7 +3223,7 @@ otherwise.
                 )
                 if primitive:
                     if not await self.prompter.prompt_subsumption(
-                        term=self.portrait.source_term,
+                        self.portrait.source_term,
                         prospective_supertype=child_term,
                         term_context=source_term_context,
                     ):
@@ -3324,8 +3423,8 @@ Main window and start config for the Bouzyges system.
 
         run_layout.addWidget(self.run_button)
         run_layout.addWidget(self.run_status)
-        run_layout.addWidget(self.progress_bar)
         right_quarter_layout.addLayout(run_layout)
+        right_quarter_layout.addWidget(self.progress_bar)
         # Logging space
         logging_layout = QtWidgets.QVBoxLayout()
         logging_subtitle = QtWidgets.QLabel("Run log")
@@ -3476,25 +3575,29 @@ Main window and start config for the Bouzyges system.
                 self.logger.error(
                     "Could not prepare Bouzyges. Check the configuration."
                 )
-                self.reset_ui()
+                self.reset_ui(fail=True)
                 return
 
-        await self.__start_job("Bouzyges Preparation", prepare)
-
+        await self.__start_job("Preparation", prepare)
         bouzyges = bouzyges_capture["success"]
-        await self.__start_job("Bouzyges Run", bouzyges.run)
 
-        await self.__start_job("Bouzyges Output", bouzyges.output)
+        run_success = await self.__start_job("Run", bouzyges.run)
+        if not run_success:
+            self.reset_ui(fail=True)
+            return
 
-        self.reset_ui()
+        write_success = await self.__start_job("Writing", bouzyges.output)
+        self.reset_ui(fail=not write_success)
 
-    def reset_ui(self) -> None:
+    def reset_ui(self, fail=False) -> None:
         self.input_options_widget.set_values()
         self.out_options_widget.set_values()
         self.options_container.setEnabled(True)
         self.io_container.setEnabled(True)
         self.run_button.setEnabled(True)
-        self.run_status.setText("Status: Ready")
+        self.run_status.setText(
+            "Status: Error occured" if fail else "Status: Ready"
+        )
         self.progress_bar.setValue(0)
         self.progress_bar.setEnabled(False)
         self.progress_bar.setTextVisible(False)
@@ -3507,7 +3610,7 @@ Main window and start config for the Bouzyges system.
 
     async def __start_job(self, name: str, async_target, *args, **kwargs):
         self.logger.info(f"Starting {name} thread")
-        self.run_status.setText(f"Status: {name}")
+        self.run_status.setText(f"Status: Bouzy ({name})")
         self.progress_bar.setEnabled(True)
         result = await async_target(
             *args, **kwargs, progress_callback=self.update_progress
@@ -3541,8 +3644,27 @@ Main window and start config for the Bouzyges system.
         model_layout.addWidget(model_label)
         model_layout.addWidget(model_input)
 
+        ## Prompt repetition
+        repeat_layout = QtWidgets.QHBoxLayout()
+        repeat_label = QtWidgets.QLabel("<u>Repeat each prompt:</u>")
+        repeat_label.setToolTip(
+            "Number of times to repeat each prompt for the LLM. The final "
+            "output will be the best result of all repetitions, e.g. for 5 "
+            "repetitions queries will stop after getting 3 of the same results."
+        )
+        repeat_input = QtWidgets.QLineEdit()
+        repeat_input.setPlaceholderText(f"Default: {DEFAULT_REPEAT_PROMPTS}")
+        repeat_text = (
+            "" if (rp := PARAMS.api.repeat_prompts) is None else str(rp)
+        )
+        repeat_input.setText(repeat_text)
+        repeat_input.textChanged.connect(self.repeat_prompts_changed)
+        repeat_layout.addWidget(repeat_label)
+        repeat_layout.addWidget(repeat_input)
+
         prompter_layout.addLayout(impl_layout)
         prompter_layout.addLayout(model_layout)
+        prompter_layout.addLayout(repeat_layout)
 
         # Snowstorm connection options
         snowstorm_layout = QtWidgets.QVBoxLayout()
@@ -3653,7 +3775,9 @@ Main window and start config for the Bouzyges system.
             new_et = int(text)
         except ValueError:
             PARAMS.prof.stop_profiling_after_seconds = None
-            self.logger.debug("Invalid input for early termination, resetting")
+            self.logger.warning(
+                "Invalid input for early termination, disabling"
+            )
             return
 
         if new_et <= 0:
@@ -3661,6 +3785,22 @@ Main window and start config for the Bouzyges system.
 
         PARAMS.prof.stop_profiling_after_seconds = new_et
         self.logger.debug(f"Early termination changed to: {new_et}")
+
+    def repeat_prompts_changed(self, text) -> None:
+        try:
+            new_repeat = int(text)
+        except ValueError:
+            PARAMS.prof.stop_profiling_after_seconds = None
+            self.logger.debug("Invalid input for prompt repeats, resetting")
+            return
+
+        if new_repeat <= 1:
+            # Make sure it's at least 1
+            self.logger.warning("Prompt repetition must be at least 1")
+            new_repeat = 1
+
+        PARAMS.api.repeat_prompts = new_repeat
+        self.logger.debug(f"Prompt repetition set to: {new_repeat}")
 
     def ll_changed(self, index) -> None:
         levels = [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR]

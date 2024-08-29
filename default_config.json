@@ -1,6 +1,7 @@
 {
   "api": {
     "prompter": "openai",
+    "repeat_prompts": null,
     "snowstorm_url": "http://localhost:8080/",
     "llm_model_id": "gpt-4o-mini",
     "cache_db": "prompt_cache.db"
