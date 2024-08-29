@@ -2309,20 +2309,13 @@ Filter out children that are descendants of bad parents and return the rest.
         """\
 Check if the child attribute-value pair is a subtype of the parent.
 """
-        ANSWER = [False, False]
+        # This is actually faster synchronously
+        if not await self.is_concept_descendant_of(
+            child.attribute, parent.attribute
+        ):
+            return False
 
-        async def check_attr():
-            ANSWER[0] = await self.is_concept_descendant_of(
-                child.attribute, parent.attribute
-            )
-
-        async def check_val():
-            ANSWER[1] = await self.is_concept_descendant_of(
-                child.value, parent.value
-            )
-
-        asyncio.gather(check_attr(), check_val())
-        return all(ANSWER)
+        return await self.is_concept_descendant_of(child.value, parent.value)
 
     async def remove_redundant_ancestors(
         self, portrait: SemanticPortrait
@@ -2840,6 +2833,7 @@ Initialize the SnowstormAPI object.
         read_file_task = cls.read_file(logger, prep_dict, report_completion)
 
         await asyncio.gather(snowstorm_task, prompter_task, read_file_task)
+        await asyncio.sleep(0.1)  # Let the progress bar catch up
 
         return cls(**prep_dict)
 
@@ -2960,6 +2954,7 @@ Run the worker thread.
             cycles = 0
             while updated:
                 updated = await self.update_anchors()
+                await asyncio.sleep(0.05)
                 cycles += updated
             changes_made = bool(cycles)
 
@@ -2982,6 +2977,7 @@ Run the worker thread.
             anchors[concept.sctid] = concept.pt
 
         asyncio.gather(*map(get_anchor_info, self.portrait.ancestor_anchors))
+        await asyncio.sleep(0.05)
         self.logger.info("\n".join(supr_message))
 
         report_progress(self)
