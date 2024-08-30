@@ -136,6 +136,15 @@ _stdout_handler.setFormatter(_formatter)
 LOGGER.addHandler(_stdout_handler)
 LOGGER.info("Logging configured")
 
+
+## Request retrying decorators
+retry_exponential = tenacity.retry(
+    wait=tenacity.wait_random_exponential(multiplier=1, max=60)
+)
+retry_fixed = tenacity.retry(
+    wait=tenacity.wait_fixed(1), stop=tenacity.stop_after_attempt(3)
+)
+
 ## Parameters
 # Load environment variables for API access
 if dotenv is not None:
@@ -1922,7 +1931,7 @@ A prompter that interfaces with the OpenAI API using.
                 )
             raise PrompterError("Failed to parse the answer")
 
-    @tenacity.retry(wait=tenacity.wait_random_exponential(multiplier=1, max=60))
+    @retry_exponential
     async def _get_completion(self, messages, **kwargs):
         return await self._client.chat.completions.create(
             messages=messages,  # type: ignore
@@ -1980,6 +1989,12 @@ class SnowstormAPI:
         self.url: Url = url
         self.mrcm_entries: list[MRCMDomainRefsetEntry] = []
 
+        self.logger.debug(
+            f"Snowstorm API URL: {self.url}; initializing async client"
+        )
+        self.async_client = httpx.AsyncClient()
+        self.logger.info("Snowstorm API client initialized")
+
         # Cache repetitive queries
         self.__concepts_cache: dict[SCTID, Concept] = {}
         self.__subsumptions_cache: dict[tuple[SCTID, SCTID], bool] = {}
@@ -1987,7 +2002,10 @@ class SnowstormAPI:
     @classmethod
     async def init(cls, url: Url) -> SnowstormAPI:
         snowstorm = cls(url)
+
+        snowstorm.logger.info("Testing connection...")
         await snowstorm.ping()
+        snowstorm.logger.info("Connection successful")
 
         # Load MRCM entries
         snowstorm.logger.info("Loading MRCM Domain Reference Set entries")
@@ -2010,6 +2028,7 @@ class SnowstormAPI:
         return snowstorm
 
     async def ping(self) -> bool:
+        self.logger.debug("Getting Snowstorm version and branch path")
         # Get the main branch path (and try connecting)
         try:
             self.logger.info("Snowstorm Version: " + await self.get_version())
@@ -2033,6 +2052,13 @@ raises an exception on non-200 responses.
             if seconds > PARAMS.prof.stop_profiling_after_seconds:
                 raise ProfileMark("Time limit exceeded")
 
+        parameters_msg = [
+            "Modifying requests with parameters:",
+            f" - args: {json.dumps(args)}",
+            f" - kwargs: {json.dumps(kwargs, indent=2)}",
+        ]
+        self.logger.debug("\n".join(parameters_msg))
+
         # Include the known url
         if "url" not in kwargs:
             args = (self.url + args[0], *args[1:])
@@ -2042,13 +2068,8 @@ raises an exception on non-200 responses.
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Accept"] = "application/json"
 
-        parameters_msg = ["Request parameters:"]
-        parameters_msg.append(f" - args: {json.dumps(args)}")
-        parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
-        self.logger.debug("\n".join(parameters_msg))
-
         try:
-            response = await self._get_unwrapped(*args, **kwargs)
+            response = await self._get_with_retries(*args, **kwargs)
         except Exception as e:
             self.logger.error(f"Could not connect to Snowstorm API: {e}")
             raise
@@ -2064,10 +2085,14 @@ raises an exception on non-200 responses.
 
         return response
 
-    @tenacity.retry(wait=tenacity.wait_random_exponential(multiplier=1, max=60))
-    async def _get_unwrapped(self, *args, **kwargs) -> httpx.Response:
-        async with httpx.AsyncClient() as client:
-            return await client.get(*args, **kwargs)
+    @retry_fixed
+    async def _get_with_retries(self, *args, **kwargs) -> httpx.Response:
+        parameters_msg = ["Sending requests with parameters:"]
+        parameters_msg.append(f" - args: {json.dumps(args)}")
+        parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
+        self.logger.debug("\n".join(parameters_msg))
+
+        return await self.async_client.get(*args, **kwargs)
 
     async def _get_collect(self, *args, **kwargs) -> list:
         """\
@@ -2775,6 +2800,7 @@ Read the input file and parse it into a list of SemanticPortrait objects.
         portraits = reader.parse()
         logger.info(f"Read {len(portraits)} portraits")
         prep_dict["portraits"] = portraits
+        logger.info("FILE READ")
         ready_callback()
 
     @staticmethod
@@ -2789,6 +2815,7 @@ Initialize the SnowstormAPI object.
             logger.error("Could not connect to Snowstorm API:", e)
             raise
         prep_dict["snowstorm"] = snowstorm
+        logger.info("SNOWSTORM API INITIALIZED")
         ready_callback()
 
     @staticmethod
@@ -2825,7 +2852,7 @@ Initialize the SnowstormAPI object.
             case _:
                 raise ValueError("Invalid prompter option")
         prep_dict["prompter"] = prompter
-        logger.info("Prompter initialized")
+        logger.info("PROMPTER INITIALIZED")
         ready_callback()
 
     @classmethod
@@ -2877,6 +2904,9 @@ Initialize the SnowstormAPI object.
             f"Time taken (s): "
             f"{(datetime.datetime.now() - start_time).total_seconds()}"
         )
+
+        self.logger.info("Closing Snowstorm API connection")
+        await self.snowstorm.async_client.aclose()
 
         return True
 
@@ -3383,15 +3413,22 @@ Main window and start config for the Bouzyges system.
         self.loop = loop
 
     def __populate_layout(self, layout):
-        self._verticalSpacer = QtWidgets.QSpacerItem(
+        self._vertical_spacer = QtWidgets.QSpacerItem(
             20,
             40,
-            QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Minimum,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        self._fixed_vertical_spacer = QtWidgets.QSpacerItem(
+            20,
+            20,
+            QtWidgets.QSizePolicy.Policy.Minimum,
+            QtWidgets.QSizePolicy.Policy.Fixed,
         )
 
         # Options
-        self.options_container = QtWidgets.QWidget()
+        self.options_container = QtWidgets.QFrame()
+        self.options_container.setFrameStyle(QtWidgets.QFrame.Shape.StyledPanel)
         self.options_container.setMaximumWidth(350)
         options_layout = QtWidgets.QVBoxLayout()
         options_subtitle = QtWidgets.QLabel("Options")
@@ -3400,13 +3437,7 @@ Main window and start config for the Bouzyges system.
         options_contents = QtWidgets.QVBoxLayout()
         self.__populate_option_contents(options_contents)
         options_layout.addLayout(options_contents)
-        spacer = QtWidgets.QSpacerItem(
-            20,
-            40,
-            QtWidgets.QSizePolicy.Policy.Minimum,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-        options_layout.addItem(spacer)
+        options_layout.addItem(self._vertical_spacer)
         self.options_container.setLayout(options_layout)
 
         # Input and output
@@ -3416,10 +3447,12 @@ Main window and start config for the Bouzyges system.
         self.__populate_io_layout(io_layout)
         self.io_container.setLayout(io_layout)
         right_quarter_layout.addWidget(self.io_container)
+        right_quarter_layout.addItem(self._vertical_spacer)
 
         # Run layout
         run_layout = QtWidgets.QHBoxLayout()
         self.run_button = QtWidgets.QPushButton("Run")
+        self.run_button.setMaximumWidth(150)
         self.run_button.clicked.connect(self.spin_bouzyges)
         self.run_status = QtWidgets.QLabel("Status: Ready")
         self.run_status.setStyleSheet("font-weight: bold;")
@@ -3454,6 +3487,8 @@ Main window and start config for the Bouzyges system.
 
     def __populate_io_layout(self, layout) -> None:
         # Input file selection
+        input_frame = QtWidgets.QFrame()
+        input_frame.setFrameStyle(QtWidgets.QFrame.Shape.StyledPanel)
         input_layout = QtWidgets.QVBoxLayout()
         input_subtitle = QtWidgets.QLabel("Input file")
         input_subtitle.setStyleSheet("font-weight: bold;")
@@ -3473,8 +3508,11 @@ Main window and start config for the Bouzyges system.
         input_layout.addLayout(input_contents)
         self.input_options_widget = IOParametersWidget(PARAMS.read, "Read")
         input_layout.addWidget(self.input_options_widget)
+        input_frame.setLayout(input_layout)
 
         # Output selection
+        output_frame = QtWidgets.QFrame()
+        output_frame.setFrameStyle(QtWidgets.QFrame.Shape.StyledPanel)
         output_layout = QtWidgets.QVBoxLayout()
         output_subtitle = QtWidgets.QLabel("Output file")
         output_subtitle.setStyleSheet("font-weight: bold;")
@@ -3490,6 +3528,7 @@ Main window and start config for the Bouzyges system.
         output_select = QtWidgets.QPushButton("Select")
         output_select.clicked.connect(self.select_output)
         out_dir_contents.addWidget(output_select)
+        output_layout.addLayout(out_dir_contents)
 
         out_file_contents = QtWidgets.QHBoxLayout()
         out_file_label = QtWidgets.QLabel("File name:")
@@ -3514,11 +3553,12 @@ Main window and start config for the Bouzyges system.
         output_layout.addLayout(out_dir_contents)
         output_layout.addLayout(out_file_contents)
         output_layout.addWidget(self.out_options_widget)
+        output_frame.setLayout(output_layout)
 
-        layout.addLayout(input_layout)
-        layout.addItem(self._verticalSpacer)
-        layout.addLayout(output_layout)
-        layout.addItem(self._verticalSpacer)
+        layout.addWidget(input_frame)
+        layout.addItem(self._vertical_spacer)
+        layout.addWidget(output_frame)
+        layout.addItem(self._vertical_spacer)
 
     def format_changed(self, idx: int) -> None:
         PARAMS.format = FileWriter.get_formats()[idx]
@@ -3772,12 +3812,18 @@ Main window and start config for the Bouzyges system.
         logging_layout.addWidget(logging_level_options)
         logging_layout.addWidget(log_to_file_checkbox)
 
-        layout.addLayout(prompter_layout)
-        layout.addLayout(snowstorm_layout)
-        layout.addLayout(sqlite_layout)
-        layout.addLayout(concurrent_layout)
+        for child in [
+            prompter_layout,
+            snowstorm_layout,
+            sqlite_layout,
+            concurrent_layout,
+        ]:
+            layout.addLayout(child)
+            layout.addItem(self._fixed_vertical_spacer)
+
         layout.addWidget(prof_label)
         layout.addLayout(prof_layout)
+        layout.addItem(self._fixed_vertical_spacer)
         layout.addWidget(logging_label)
         layout.addLayout(logging_layout)
 
