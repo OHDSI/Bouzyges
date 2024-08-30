@@ -4,14 +4,15 @@
     "repeat_prompts": null,
     "snowstorm_url": "http://localhost:8080/",
     "llm_model_id": "gpt-4o-mini",
-    "cache_db": "prompt_cache.db"
+    "cache_db": "prompt_cache.db",
+    "max_concurrent_workers": 8
   },
   "log": {
     "log_to_file": true,
-    "logging_level": 20
+    "logging_level": 10
   },
   "prof": {
-    "enabled": true,
+    "enabled": false,
     "stop_profiling_after_seconds": null
   },
   "read": {

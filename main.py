@@ -193,6 +193,7 @@ Parameters to control the interface to Snowstorm, cache and LLMs.
     snowstorm_url: Url
     llm_model_id: str
     cache_db: str | None
+    max_concurrent_workers: int
 
 
 class EnvironmentParameters(pydantic.BaseModel):
@@ -2041,12 +2042,16 @@ raises an exception on non-200 responses.
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Accept"] = "application/json"
 
+        parameters_msg = ["Request parameters:"]
+        parameters_msg.append(f" - args: {json.dumps(args)}")
+        parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
+        self.logger.debug("\n".join(parameters_msg))
+
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(*args, **kwargs)
+            response = await self._get_unwrapped(*args, **kwargs)
         except Exception as e:
             self.logger.error(f"Could not connect to Snowstorm API: {e}")
-            raise BouzygesError(f"Could not connect to Snowstorm API: {e}")
+            raise
 
         if not response.status_code < 400:
             self.logger.error(
@@ -2058,6 +2063,11 @@ raises an exception on non-200 responses.
             raise SnowstormRequestError.from_response(response)
 
         return response
+
+    @tenacity.retry(wait=tenacity.wait_random_exponential(multiplier=1, max=60))
+    async def _get_unwrapped(self, *args, **kwargs) -> httpx.Response:
+        async with httpx.AsyncClient() as client:
+            return await client.get(*args, **kwargs)
 
     async def _get_collect(self, *args, **kwargs) -> list:
         """\
@@ -2853,13 +2863,14 @@ Initialize the SnowstormAPI object.
             done.append(worker)
             progress_callback(len(done), len(workers))
 
-        try:
-            self.results = await asyncio.gather(
-                *map(lambda w: w.run(report_progress), workers)
-            )
-        except Exception as e:
-            self.logger.error(f"An error occurred: {e}")
-            return False
+        async with asyncio.Semaphore(PARAMS.api.max_concurrent_workers):
+            try:
+                self.results = await asyncio.gather(
+                    *map(lambda w: w.run(report_progress), workers)
+                )
+            except Exception as e:
+                self.logger.error(f"An error occurred: {e}")
+                return False
 
         self.logger.info("Routine finished")
         self.logger.info(
@@ -3604,6 +3615,11 @@ Main window and start config for the Bouzyges system.
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat(f"{value}/{max}")
 
+    def reset_progress(self) -> None:
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFormat("")
+
     async def __start_job(self, name: str, async_target, *args, **kwargs):
         self.logger.info(f"Starting {name} thread")
         self.run_status.setText(f"Status: Bouzy ({name})")
@@ -3611,6 +3627,7 @@ Main window and start config for the Bouzyges system.
         result = await async_target(
             *args, **kwargs, progress_callback=self.update_progress
         )
+        self.reset_progress()
         self.logger.info(f"{name} thread finished")
         return result
 
@@ -3697,6 +3714,16 @@ Main window and start config for the Bouzyges system.
         sqlite_selector_layout.addWidget(sqlite_select)
         sqlite_layout.addLayout(sqlite_selector_layout)
 
+        # Concurrent workers
+        concurrent_layout = QtWidgets.QHBoxLayout()
+        concurrent_label = QtWidgets.QLabel("Max concurrent workers:")
+        concurrent_input = QtWidgets.QLineEdit()
+        concurrent_input.setPlaceholderText("No concurrency")
+        concurrent_input.setText(str(PARAMS.api.max_concurrent_workers))
+        concurrent_input.textChanged.connect(self.concurrent_workers_changed)
+        concurrent_layout.addWidget(concurrent_label)
+        concurrent_layout.addWidget(concurrent_input)
+
         # Developer options
         prof_label = QtWidgets.QLabel("Profiling:")
         prof_label.setStyleSheet("font-weight: bold;")
@@ -3748,6 +3775,7 @@ Main window and start config for the Bouzyges system.
         layout.addLayout(prompter_layout)
         layout.addLayout(snowstorm_layout)
         layout.addLayout(sqlite_layout)
+        layout.addLayout(concurrent_layout)
         layout.addWidget(prof_label)
         layout.addLayout(prof_layout)
         layout.addWidget(logging_label)
@@ -3798,6 +3826,21 @@ Main window and start config for the Bouzyges system.
         PARAMS.api.repeat_prompts = new_repeat
         self.logger.debug(f"Prompt repetition set to: {new_repeat}")
 
+    def concurrent_workers_changed(self, text) -> None:
+        try:
+            new_workers = int(text)
+        except ValueError:
+            PARAMS.api.max_concurrent_workers = 1
+            self.logger.debug("Invalid input for workers, disabling")
+            return
+
+        if new_workers <= 1:
+            self.logger.warning("Concurrency implicitly disabled")
+            new_workers = 1
+
+        PARAMS.api.max_concurrent_workers = new_workers
+        self.logger.debug(f"Max concurrent workers set to: {new_workers}")
+
     def ll_changed(self, index) -> None:
         levels = [logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR]
         new_level = levels[index]
@@ -3838,7 +3881,7 @@ Main window and start config for the Bouzyges system.
             parent=self,
         )
         load_config_action.triggered.connect(self.load_config)
-        load_config_action.setShortcut("Ctrl+O")
+        load_config_action.setShortcut(QtGui.QKeySequence.StandardKey.Open)
         file_menu.addAction(load_config_action)
 
         save_config_action = QtGui.QAction(
@@ -3847,7 +3890,7 @@ Main window and start config for the Bouzyges system.
             parent=self,
         )
         save_config_action.triggered.connect(self.save_config)
-        save_config_action.setShortcut("Ctrl+S")
+        save_config_action.setShortcut(QtGui.QKeySequence.StandardKey.Save)
         file_menu.addAction(save_config_action)
 
         quit_action = QtGui.QAction(
@@ -3855,7 +3898,7 @@ Main window and start config for the Bouzyges system.
             text="Quit",
             parent=self,
         )
-        quit_action.setShortcut("Ctrl+Q")
+        quit_action.setShortcut(QtGui.QKeySequence.StandardKey.Quit)
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
@@ -3885,14 +3928,14 @@ Main window and start config for the Bouzyges system.
         license_action.triggered.connect(self.license)
         help_menu.addAction(license_action)
 
-        report_issue_action = QtGui.QAction(
+        report_action = QtGui.QAction(
             icon=QtGui.QIcon.fromTheme("help-report-bug"),
             text="Report an issue or get help",
             parent=self,
         )
-        report_issue_action.triggered.connect(self.report_issue)
-        report_issue_action.setShortcut("F1")
-        help_menu.addAction(report_issue_action)
+        report_action.triggered.connect(self.report_issue)
+        report_action.setShortcut(QtGui.QKeySequence.StandardKey.HelpContents)
+        help_menu.addAction(report_action)
 
     def about(self):
         label = (
@@ -3942,7 +3985,7 @@ Main window and start config for the Bouzyges system.
 
 
 def main():
-    loop = qasync.QEventLoop()
+    loop = qasync.QEventLoop(APP)
     asyncio.set_event_loop(loop)
     window = BouzygesWindow(loop=loop)
     window.show()
