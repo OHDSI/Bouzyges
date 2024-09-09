@@ -13,6 +13,7 @@ import pstats
 import re
 import sqlite3
 import sys
+import threading
 import unittest
 from abc import ABC, abstractmethod
 from collections import Counter
@@ -1995,12 +1996,18 @@ class SnowstormAPI:
         self.async_client = httpx.AsyncClient()
         self.logger.info("Snowstorm API client initialized")
 
+        # Request queue: we accept requests asynchronously, but process them
+        # sequentially to avoid overloading the API
+        self.request_queue_thread: threading.Thread | None = None
+        self.__accepting_requests = True
+        self.__request_queue: asyncio.Queue[httpx.Request] = asyncio.Queue()
+
         # Cache repetitive queries
         self.__concepts_cache: dict[SCTID, Concept] = {}
         self.__subsumptions_cache: dict[tuple[SCTID, SCTID], bool] = {}
 
     @classmethod
-    async def init(cls, url: Url) -> SnowstormAPI:
+    async def async_init(cls, url: Url) -> SnowstormAPI:
         snowstorm = cls(url)
 
         snowstorm.logger.info("Testing connection...")
@@ -2025,7 +2032,32 @@ class SnowstormAPI:
             entries_msg.append("    - " + entry.guide_link)
         snowstorm.logger.debug("\n".join(entries_msg))
 
+        snowstorm.logger.info("Starting request queue thread")
+        # asyncio.create_task(snowstorm.spin_request_queue())
+        snowstorm.request_queue_thread = threading.Thread(
+            target=snowstorm.spin_request_queue, daemon=True
+        )
+        snowstorm.request_queue_thread.start()
+
         return snowstorm
+
+    def spin_request_queue(self):
+        while self.__accepting_requests:
+            asyncio.run(asyncio.sleep(0.1))
+            self.logger.warning("Request queue thread running")
+        self.logger.info("Request queue thread stopped")
+
+    async def async_shutdown(self):
+        self.logger.info("Shutting down Snowstorm API client")
+
+        self.logger.info("Stopping request queue thread")
+        self.__accepting_requests = False
+        assert self.request_queue_thread is not None
+        self.request_queue_thread.join()
+        self.request_queue_thread = None
+
+        self.logger.info("Closing httpx API client")
+        await self.async_client.aclose()
 
     async def ping(self) -> bool:
         self.logger.debug("Getting Snowstorm version and branch path")
@@ -2042,7 +2074,7 @@ class SnowstormAPI:
 
     async def _get(self, *args, **kwargs) -> httpx.Response:
         """\
-Wrapper for requests.get that prepends known url and
+Wrapper for httpx.get that prepends known url and
 raises an exception on non-200 responses.
 """
         # Check for the timeout
@@ -2810,7 +2842,7 @@ Initialize the SnowstormAPI object.
 """
         logger.info("Initializing Snowstorm API...")
         try:
-            snowstorm = await SnowstormAPI.init(PARAMS.api.snowstorm_url)
+            snowstorm = await SnowstormAPI.async_init(PARAMS.api.snowstorm_url)
         except Exception as e:
             logger.error("Could not connect to Snowstorm API:", e)
             raise
@@ -2906,7 +2938,7 @@ Initialize the SnowstormAPI object.
         )
 
         self.logger.info("Closing Snowstorm API connection")
-        await self.snowstorm.async_client.aclose()
+        await self.snowstorm.async_shutdown()
 
         return True
 
