@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import cProfile
 import csv
+import concurrent.futures
 import datetime
 import itertools
 import json
@@ -1981,6 +1982,7 @@ class SnowstormAPI:
     CONTENT_TYPE_PREFERENCE = "NEW_PRECOORDINATED", "PRECOORDINATED", "ALL"
     PAGINATION_STEP = 100
     MAX_BAD_PARENT_QUERY = 32
+    MAX_CONCURRENT_REQUESTS = 1
 
     def __init__(self, url: Url):
         # Debug
@@ -1993,6 +1995,10 @@ class SnowstormAPI:
             f"Snowstorm API URL: {self.url}; initializing async client"
         )
         self.async_client = httpx.AsyncClient()
+        # Intentional bottleneck to avoid overloading the API
+        self.executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.MAX_CONCURRENT_REQUESTS
+        )
         self.logger.info("Snowstorm API client initialized")
 
         # Cache repetitive queries
@@ -2068,8 +2074,21 @@ raises an exception on non-200 responses.
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Accept"] = "application/json"
 
+        parameters_msg = ["Sending requests with parameters:"]
+        parameters_msg.append(f" - args: {json.dumps(args)}")
+        parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
+        self.logger.debug("\n".join(parameters_msg))
+
+        request: httpx.Request = httpx.Request("GET", *args, **kwargs)
+
+        future_response = self.executor.submit(self.async_client.send, request)
+
+        while not future_response.done():
+            # Let other tasks run
+            await asyncio.sleep(0.1)
+
         try:
-            response = await self._get_with_retries(*args, **kwargs)
+            response = await future_response.result()
         except Exception as e:
             self.logger.error(f"Could not connect to Snowstorm API: {e}")
             raise
@@ -2084,15 +2103,6 @@ raises an exception on non-200 responses.
             raise SnowstormRequestError.from_response(response)
 
         return response
-
-    @retry_fixed
-    async def _get_with_retries(self, *args, **kwargs) -> httpx.Response:
-        parameters_msg = ["Sending requests with parameters:"]
-        parameters_msg.append(f" - args: {json.dumps(args)}")
-        parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
-        self.logger.debug("\n".join(parameters_msg))
-
-        return await self.async_client.get(*args, **kwargs)
 
     async def _get_collect(self, *args, **kwargs) -> list:
         """\
