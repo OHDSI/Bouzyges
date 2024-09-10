@@ -17,7 +17,7 @@ import threading
 import unittest
 from abc import ABC, abstractmethod
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, astuple
 from functools import wraps
 from typing import (
     Any,
@@ -646,6 +646,15 @@ Convert a SemanticPortrait to a SNOMED CT Post-Coordinated Expression
             + ":" * bool(attributes)
             + attributes
         )
+
+
+@dataclass(slots=True)
+class NumberedRequest:
+    """\
+Represents a request with an assigned number for tracking.
+"""
+    number: int
+    request: httpx.Request
 
 
 class WrappedResult:
@@ -1993,6 +2002,7 @@ class SnowstormAPI:
         self.logger.debug(
             f"Snowstorm API URL: {self.url}; initializing async client"
         )
+        # TODO: this does not actually needs to be async anymore, switch back
         self.async_client = httpx.AsyncClient()
         self.logger.info("Snowstorm API client initialized")
 
@@ -2000,7 +2010,9 @@ class SnowstormAPI:
         # sequentially to avoid overloading the API
         self.request_queue_thread: threading.Thread | None = None
         self.__accepting_requests = True
-        self.__request_queue: asyncio.Queue[httpx.Request] = asyncio.Queue()
+        self.__request_queue: asyncio.Queue[NumberedRequest] = asyncio.Queue()
+        self.__next_request_id = 0  # Much easier than custom hashing
+        self.__responses: dict[int, httpx.Response] = {}
 
         # Cache repetitive queries
         self.__concepts_cache: dict[SCTID, Concept] = {}
@@ -2033,18 +2045,33 @@ class SnowstormAPI:
         snowstorm.logger.debug("\n".join(entries_msg))
 
         snowstorm.logger.info("Starting request queue thread")
-        # asyncio.create_task(snowstorm.spin_request_queue())
         snowstorm.request_queue_thread = threading.Thread(
             target=snowstorm.spin_request_queue, daemon=True
         )
         snowstorm.request_queue_thread.start()
+        snowstorm.request_queue_thread.run()
 
         return snowstorm
 
     def spin_request_queue(self):
         while self.__accepting_requests:
-            asyncio.run(asyncio.sleep(0.1))
-            self.logger.warning("Request queue thread running")
+            self.logger.info("Request queue thread running")
+            if not self.__request_queue.empty():
+                numbered_request = asyncio.run(self.__request_queue.get())
+                id, request = astuple(numbered_request)
+                self.logger.debug(f"Request queue thread processing #{id}")
+
+                try:
+                    response = asyncio.run(self.async_client.send(request))
+                except Exception as e:
+                    self.logger.error(f"Snowstorm API: {e}")
+                    raise
+
+                self.__responses[id] = response
+            else:
+                # Let other threads post requests
+                self.logger.debug("Request queue thread sleeping")
+                asyncio.run(asyncio.sleep(0.1))
         self.logger.info("Request queue thread stopped")
 
     async def async_shutdown(self):
@@ -2100,11 +2127,20 @@ raises an exception on non-200 responses.
         kwargs["headers"] = kwargs.get("headers", {})
         kwargs["headers"]["Accept"] = "application/json"
 
-        try:
-            response = await self._get_with_retries(*args, **kwargs)
-        except Exception as e:
-            self.logger.error(f"Could not connect to Snowstorm API: {e}")
-            raise
+        request_id = self.__next_request_id
+        self.__next_request_id += 1
+
+        request = httpx.Request("GET", *args, **kwargs)
+
+        # Post request to the queue
+        numbered_request = NumberedRequest(request_id, request)
+        await self.__request_queue.put(numbered_request)
+
+        # Wait for the response
+        while request_id not in self.__responses:
+            await asyncio.sleep(0.1)
+
+        response = self.__responses.pop(request_id)
 
         if not response.status_code < 400:
             self.logger.error(
@@ -2116,15 +2152,6 @@ raises an exception on non-200 responses.
             raise SnowstormRequestError.from_response(response)
 
         return response
-
-    @retry_fixed
-    async def _get_with_retries(self, *args, **kwargs) -> httpx.Response:
-        parameters_msg = ["Sending requests with parameters:"]
-        parameters_msg.append(f" - args: {json.dumps(args)}")
-        parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
-        self.logger.debug("\n".join(parameters_msg))
-
-        return await self.async_client.get(*args, **kwargs)
 
     async def _get_collect(self, *args, **kwargs) -> list:
         """\
