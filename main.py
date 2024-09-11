@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import cProfile
 import csv
-import concurrent.futures
 import datetime
 import itertools
 import json
@@ -15,14 +15,14 @@ import re
 import sqlite3
 import sys
 import unittest
+import webbrowser
 from abc import ABC, abstractmethod
 from collections import Counter
 from dataclasses import dataclass
 from functools import wraps
 from typing import (
-    Any,
+    Awaitable,
     Callable,
-    Coroutine,
     Iterable,
     Literal,
     Mapping,
@@ -36,10 +36,9 @@ import httpx
 import openai
 import pandas as pd
 import pydantic
-import tenacity
-import webbrowser
-from frozendict import frozendict
 import qasync
+import tenacity
+from frozendict import frozendict
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 # Optional imports
@@ -1372,7 +1371,7 @@ PromptAnswerT = TypeVar(
 )
 
 
-def ask_many(method: Callable[..., Coroutine[Any, Any, PromptAnswerT]]):
+def ask_many(method: Callable[..., Awaitable[PromptAnswerT]]):
     """\
 Decorator for methods that require prompting. Will repeat the prompt until
 enough correct answers are received.
@@ -2795,7 +2794,7 @@ Main logic host for the Bouzyges system.
         self.results: list[WrappedResult] = []
 
     @staticmethod
-    async def read_file(logger, prep_dict, ready_callback) -> None:
+    async def read_file(logger, prep_dict) -> None:
         """\
 Read the input file and parse it into a list of SemanticPortrait objects.
 """
@@ -2811,10 +2810,9 @@ Read the input file and parse it into a list of SemanticPortrait objects.
         logger.info(f"Read {len(portraits)} portraits")
         prep_dict["portraits"] = portraits
         logger.info("FILE READ")
-        ready_callback()
 
     @staticmethod
-    async def get_snowstorm(logger, prep_dict, ready_callback):
+    async def get_snowstorm(logger, prep_dict):
         """\
 Initialize the SnowstormAPI object.
 """
@@ -2826,10 +2824,9 @@ Initialize the SnowstormAPI object.
             raise
         prep_dict["snowstorm"] = snowstorm
         logger.info("SNOWSTORM API INITIALIZED")
-        ready_callback()
 
     @staticmethod
-    async def get_prompter(logger, prep_dict, ready_callback):
+    async def get_prompter(logger, prep_dict):
         logger.info("Initializing prompter...")
         repeat_prompts = (
             DEFAULT_REPEAT_PROMPTS
@@ -2863,7 +2860,6 @@ Initialize the SnowstormAPI object.
                 raise ValueError("Invalid prompter option")
         prep_dict["prompter"] = prompter
         logger.info("PROMPTER INITIALIZED")
-        ready_callback()
 
     @classmethod
     async def prepare(cls, progress_callback) -> Self:
@@ -2872,14 +2868,18 @@ Initialize the SnowstormAPI object.
 
         prep_dict = {}
 
-        def report_completion():
+        def report_completion(future):
+            logger.info(f"Reporting task as completed: {future.result()}")
             progress_callback(len(prep_dict), 3)
 
-        snowstorm_task = cls.get_snowstorm(logger, prep_dict, report_completion)
-        prompter_task = cls.get_prompter(logger, prep_dict, report_completion)
-        read_file_task = cls.read_file(logger, prep_dict, report_completion)
+        prep_futures: list[Awaitable[None]] = []
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            for task in [cls.get_snowstorm, cls.get_prompter, cls.read_file]:
+                future = executor.submit(task, logger, prep_dict)
+                future.add_done_callback(report_completion)
+                prep_futures.append(future.result())
 
-        await asyncio.gather(snowstorm_task, prompter_task, read_file_task)
+        await asyncio.gather(*prep_futures)
         await asyncio.sleep(0.1)  # Let the progress bar catch up
 
         return cls(**prep_dict)
@@ -2894,20 +2894,21 @@ Initialize the SnowstormAPI object.
             for i, portrait in enumerate(self.portraits.values())
         ]
 
-        done: list[_BouzygesWorker] = []
+        done: int = 0
 
-        def report_progress(worker: _BouzygesWorker):
-            done.append(worker)
-            progress_callback(len(done), len(workers))
+        def run_worker(worker: _BouzygesWorker) -> Awaitable[WrappedResult]:
+            nonlocal done
+            result_awaitable = worker.run()
+            done += 1
+            progress_callback(done, len(workers))
+            return result_awaitable
 
-        async with asyncio.Semaphore(PARAMS.api.max_concurrent_workers):
-            try:
-                self.results = await asyncio.gather(
-                    *map(lambda w: w.run(report_progress), workers)
-                )
-            except Exception as e:
-                self.logger.error(f"An error occurred: {e}")
-                return False
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            awaitable_results: Iterable[Awaitable[WrappedResult]] = (
+                executor.map(run_worker, workers)
+            )
+
+        self.results = await asyncio.gather(*awaitable_results)
 
         self.logger.info("Routine finished")
         self.logger.info(
@@ -2976,14 +2977,14 @@ source term.
 
         self.logger.info(f"Worker for '{self.source_term}' is ready")
 
-    async def run(self, report_progress) -> WrappedResult:
+    async def run(self) -> WrappedResult:
         """\
 Run the worker thread.
 """
         start_time = datetime.datetime.now()
         self.logger.info(f"Started at: {start_time}")
         try:
-            return await self._run(report_progress)
+            return await self._run()
         except Exception as e:
             self.logger.error(f"An error occurred: {e}")
             raise
@@ -2994,7 +2995,7 @@ Run the worker thread.
             )
             self.prompter.report_usage()
 
-    async def _run(self, report_progress) -> WrappedResult:
+    async def _run(self) -> WrappedResult:
         await self.initialize_supertypes()
         await self.populate_attribute_candidates()
         await self.populate_unchecked_attributes()
@@ -3031,7 +3032,6 @@ Run the worker thread.
         await asyncio.sleep(0.05)
         self.logger.info("\n".join(supr_message))
 
-        report_progress(self)
         return WrappedResult(self.portrait, anchors)
 
     async def initialize_supertypes(self):
