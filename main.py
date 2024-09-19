@@ -2086,11 +2086,11 @@ raises an exception on non-200 responses.
             # Let other tasks run
             await asyncio.sleep(0.1)
 
-        try:
-            response = await future_response.result()
-        except Exception as e:
-            self.logger.error(f"Could not connect to Snowstorm API: {e}")
-            raise
+        if (exc := future_response.exception()) is not None:
+            self.logger.error(f"Could not connect to Snowstorm API: {exc}")
+            raise exc
+
+        response = await future_response.result()
 
         if not response.status_code < 400:
             self.logger.error(
