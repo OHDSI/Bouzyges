@@ -160,7 +160,11 @@ AVAILABLE_PROMPTERS: dict[PrompterOption, str] = {
     "azure": "Azure OpenAI",
     "human": "Human",
 }
-SEPARATORS: list[str] = [",", ";", "Tab"]
+CSV_SEPARATORS: dict[str, str] = {
+    ",": ",",
+    ";": ";",
+    "Tab": "\t",
+}
 QUOTECHARS: list[str] = ['"', "'"]
 QUOTING_POLICY: dict[int, str] = {
     csv.QUOTE_MINIMAL: "Quote minimal",
@@ -244,7 +248,7 @@ class IOParametersWidget(QtWidgets.QWidget):
     def _populate_layout(self) -> None:
         layout = QtWidgets.QHBoxLayout()
         self.sep_cb = QtWidgets.QComboBox()
-        self.sep_cb.addItems(map(lambda s: "Separator: " + s, SEPARATORS))
+        self.sep_cb.addItems(map(lambda s: "Separator: " + s, CSV_SEPARATORS))
         self.sep_cb.currentIndexChanged.connect(self.separator_changed)
         layout.addWidget(self.sep_cb)
         self.quoting_cb = QtWidgets.QComboBox()
@@ -268,8 +272,8 @@ class IOParametersWidget(QtWidgets.QWidget):
         self.setLayout(layout)
 
     def separator_changed(self, index) -> None:
-        self.parameters.sep = SEPARATORS[index]
-        self.logger.debug(f"Separator changed to: {SEPARATORS[index]}")
+        self.parameters.sep = list(CSV_SEPARATORS)[index]
+        self.logger.debug(f"Separator changed to: {self.parameters.sep}")
 
     def quoting_policy_changed(self, index) -> None:
         self.parameters.quoting = list(QUOTING_POLICY)[index]
@@ -292,7 +296,8 @@ class IOParametersWidget(QtWidgets.QWidget):
         self.logger.debug(f"Input file set to: {file}")
 
     def set_values(self) -> None:
-        self.sep_cb.setCurrentIndex(SEPARATORS.index(self.parameters.sep))
+        idx = list(CSV_SEPARATORS).index(self.parameters.sep)
+        self.sep_cb.setCurrentIndex(idx)
         self.quoting_cb.setCurrentIndex(
             list(QUOTING_POLICY).index(self.parameters.quoting)
         )
@@ -2500,16 +2505,12 @@ A class to read and parse files.
         """\
 Read the file
 """
-        decode_sep = {
-            "Tab": "\t",
-        }
-        encoded_sep = PARAMS.read.sep
 
         try:
             df = pd.read_csv(
                 self.path,
                 dtype=str,
-                sep=decode_sep.get(encoded_sep, encoded_sep),
+                sep=CSV_SEPARATORS[PARAMS.read.sep],
                 quotechar=PARAMS.read.quotechar,
             )
         except Exception as e:
@@ -2610,7 +2611,7 @@ A class to write resulting files.
             self.content.to_csv(
                 self.path,
                 index=False,
-                sep=PARAMS.write.sep,
+                sep=CSV_SEPARATORS[PARAMS.write.sep],
                 quotechar=PARAMS.write.quotechar,
                 quoting=PARAMS.write.quoting,
                 na_rep="",
