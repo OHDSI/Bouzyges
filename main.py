@@ -2576,10 +2576,17 @@ class FileWriter:
 A class to write resulting files.
 """
 
-    def __init__(self, path: str, format: OutFormat = "SCG") -> None:
-        self.logger = LOGGER.getChild(self.__class__.__name__)
+    def __init__(
+        self,
+        path: str,
+        append: bool,
+        format: OutFormat = "SCG",
+        logger: logging.Logger = LOGGER,
+    ) -> None:
+        self.logger = logger.getChild(self.__class__.__name__)
         self.path = path
         self.content: pd.DataFrame | Json | None = None
+        self.append = append
 
         self.write_chosen: Callable[[Iterable[WrappedResult]], None]
         match format:
@@ -2615,6 +2622,7 @@ A class to write resulting files.
                 quotechar=PARAMS.write.quotechar,
                 quoting=PARAMS.write.quoting,
                 na_rep="",
+                mode="a" if self.append else "w",
             )
         except Exception as e:
             self.logger.error(f"Could not write to {self.path}: {e}")
@@ -2752,8 +2760,18 @@ JSON schema:
                 "metadata": dict(portrait.metadata),
             }
             dicts.append(row)
-        self.content = {"items": dicts}
-        self.logger.debug("Content ready")
+
+        # Get existing content
+        existing = []
+        if self.append:
+            if os.path.exists(self.path):
+                with open(self.path, "r") as f:
+                    existing = json.load(f)
+        self.logger.debug(f"Existing content of length {len(existing)} loaded")
+
+        existing.extend(dicts)
+        self.content = {"items": existing}
+        self.logger.debug(f"Total content length: {len(existing)}")
 
         with open(self.path, "w") as f:
             try:
@@ -2911,19 +2929,6 @@ Initialize the SnowstormAPI object.
 
         return True
 
-    async def output(self, progress_callback) -> None:
-        """\
-Output the results of the Bouzyges system.
-"""
-        progress_callback(0, 1)
-        if PARAMS.write.file is None:
-            raise BouzygesError("No output file specified")
-
-        out_path = os.path.join(PARAMS.out_dir, PARAMS.write.file)
-        writer = FileWriter(out_path, format=PARAMS.format)
-        writer.write_chosen(self.results)
-        progress_callback(1, 1)
-
     async def run(self, progress_callback) -> bool:
         """\
 Run the Bouzyges system.
@@ -2966,6 +2971,12 @@ source term.
         self.__mrcm_entries = bouzyges.snowstorm.mrcm_entries
 
         self.logger.info(f"Worker for '{self.source_term}' is ready")
+        self.writer = FileWriter(
+            os.path.join(PARAMS.out_dir, PARAMS.write.file),
+            format=PARAMS.format,
+            append=True,
+            logger=self.logger,
+        )
 
     async def run(self, report_progress) -> WrappedResult:
         """\
@@ -3024,8 +3035,11 @@ Run the worker thread.
         await asyncio.sleep(0.05)
         self.logger.info("\n".join(supr_message))
 
+        result = WrappedResult(self.portrait, anchors)
+        self.logger.info("Worker finished, writing result")
+        self.writer.write_chosen([result])
         report_progress(self)
-        return WrappedResult(self.portrait, anchors)
+        return result
 
     async def initialize_supertypes(self):
         """\
@@ -3637,9 +3651,6 @@ Main window and start config for the Bouzyges system.
         if not run_success:
             self.reset_ui(fail=True)
             return
-
-        write_success = await self.__start_job("Writing", bouzyges.output)
-        self.reset_ui(fail=not write_success)
 
     def reset_ui(self, fail=False) -> None:
         self.input_options_widget.set_values()
