@@ -2371,7 +2371,7 @@ Remove ancestors that are descendants of other ancestors.
             if await self.is_concept_descendant_of(other, ancestor):
                 redundant_ancestors.add(ancestor)
 
-        asyncio.gather(*map(check_pair, ancestor_matrix))
+        await asyncio.gather(*map(check_pair, ancestor_matrix))
 
         portrait.ancestor_anchors -= redundant_ancestors
 
@@ -2397,7 +2397,7 @@ Get a concept's Proximal Primitive Parents
             else:
                 out.add(concept)
 
-        asyncio.gather(*map(process_concept, concepts))
+        await asyncio.gather(*map(process_concept, concepts))
         return out
 
     async def check_inferred_subsumption(
@@ -2433,10 +2433,10 @@ manually/with LLM.
                 if await self.is_concept_descendant_of(anchor, ppp):
                     anchor_matched_ppp.add(ppp)
 
-            asyncio.gather(*map(check_ppp, unmatched_predicate_ppp))
+            await asyncio.gather(*map(check_ppp, unmatched_predicate_ppp))
             unmatched_predicate_ppp -= anchor_matched_ppp
 
-        asyncio.gather(*map(check_anchor, portrait.ancestor_anchors))
+        await asyncio.gather(*map(check_anchor, portrait.ancestor_anchors))
 
         if unmatched_predicate_ppp:
             self.logger.debug(
@@ -3018,7 +3018,9 @@ Run the worker thread.
             supr_message.append(f" - {concept.sctid} {concept.pt}")
             anchors[concept.sctid] = concept.pt
 
-        asyncio.gather(*map(get_anchor_info, self.portrait.ancestor_anchors))
+        await asyncio.gather(
+            *map(get_anchor_info, self.portrait.ancestor_anchors)
+        )
         await asyncio.sleep(0.05)
         self.logger.info("\n".join(supr_message))
 
@@ -3270,9 +3272,11 @@ otherwise.
 
                 new_anchors.add(child_id)
 
-            asyncio.gather(*map(process_child, children.items()))
+            await asyncio.gather(*map(process_child, children.items()))
 
-        asyncio.gather(*map(process_anchor, self.portrait.ancestor_anchors))
+        await asyncio.gather(
+            *map(process_anchor, self.portrait.ancestor_anchors)
+        )
 
         if not new_anchors:
             self.logger.debug("No new ancestors found")
