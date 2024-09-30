@@ -2098,12 +2098,25 @@ raises an exception on non-200 responses.
 
     @retry_fixed
     async def _get_with_retries(self, *args, **kwargs) -> httpx.Response:
-        parameters_msg = ["Sending requests with parameters:"]
-        parameters_msg.append(f" - args: {json.dumps(args)}")
-        parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
-        self.logger.debug("\n".join(parameters_msg))
-
-        return await self.async_client.get(*args, **kwargs)
+        try:
+            parameters_msg = ["Sending requests with parameters:"]
+            parameters_msg.append(f" - args: {json.dumps(args)}")
+            parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
+            self.logger.debug("\n".join(parameters_msg))
+            response = await self.async_client.get(*args, **kwargs)
+            self.logger.debug("Success")
+            return response
+        except Exception as e:
+            # HACK: flush the connections on failure. This why we need to
+            # Move away from Snowstorm and httpx async
+            self.logger.error(
+                f"Failed to connect: {type(e)}. Flushing connections"
+            )
+            transport: httpx.AsyncHTTPTransport = self.async_client._transport  # type: ignore
+            await transport._pool._close_connections(
+                transport._pool.connections
+            )
+            raise
 
     async def _get_collect(self, *args, **kwargs) -> list:
         """\
@@ -2408,24 +2421,18 @@ Remove ancestors that are descendants of other ancestors.
 Get a concept's Proximal Primitive Parents
 """
         response = await self._get(
-            f"{self.branch_path}/concepts/{concept}/normal-form",
+            f"{self.branch_path}/concepts/{concept}/authoring-form",
         )
 
-        focus_concepts_string = response.json()["expression"].split(" : ")[0]
-        self.logger.debug(f"PPP for {concept}: {focus_concepts_string}")
-        concepts = map(SCTID, focus_concepts_string.split(" + "))
+        out: set[SCTID] = set()
 
-        out = set()
-
-        async def process_concept(concept):
-            nonlocal out
-            concept_info = await self.get_concept(concept)
-            if concept_info.defined:
-                out |= await self.get_concept_ppp(concept)
+        for parent in response.json()["concepts"]:
+            sctid = SCTID(parent["id"])
+            if parent["primitive"]:
+                out.add(sctid)
             else:
-                out.add(concept)
+                out |= await self.get_concept_ppp(sctid)
 
-        await asyncio.gather(*map(process_concept, concepts))
         return out
 
     async def check_inferred_subsumption(
@@ -2933,7 +2940,7 @@ Initialize the SnowstormAPI object.
             progress_callback(len(prep_dict), 3)
 
         limits = httpx.Limits(
-            max_connections=1, max_keepalive_connections=1, keepalive_expiry=0
+            max_connections=20, max_keepalive_connections=0, keepalive_expiry=0
         )
         http_client = httpx.AsyncClient(limits=limits)
         futures = []
