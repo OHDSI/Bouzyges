@@ -142,7 +142,7 @@ retry_exponential = tenacity.retry(
     wait=tenacity.wait_random_exponential(multiplier=1, max=60)
 )
 retry_fixed = tenacity.retry(
-    wait=tenacity.wait_fixed(1), stop=tenacity.stop_after_attempt(3)
+    wait=tenacity.wait_fixed(15), stop=tenacity.stop_never
 )
 
 ## Parameters
@@ -1752,6 +1752,7 @@ A prompter that interfaces with the OpenAI API using.
     def __init__(
         self,
         *args,
+        http_client: httpx.AsyncClient,
         repeat_prompts: int | None = None,
         model: str,
         **kwargs,
@@ -1759,7 +1760,7 @@ A prompter that interfaces with the OpenAI API using.
         super().__init__(*args, **kwargs)
 
         self._model_id = model
-        self._init_client(*args, **kwargs)
+        self._init_client(*args, http_client=http_client, **kwargs)
 
         if repeat_prompts is not None:
             self.min_attempts = repeat_prompts
@@ -1780,7 +1781,7 @@ A prompter that interfaces with the OpenAI API using.
             )
             self._estimation_encoding = None
 
-    def _init_client(self, *args, **kwargs):
+    def _init_client(self, *args, http_client: httpx.AsyncClient, **kwargs):
         self.logger.info("Initializing the OpenAI API client...")
         _ = args, kwargs
         # API Key will be picked up from env variables
@@ -1790,7 +1791,7 @@ A prompter that interfaces with the OpenAI API using.
                 f"Can not initialize {self} without OPENAI_API_KEY"
             )
 
-        self._client = openai.AsyncOpenAI()
+        self._client = openai.AsyncOpenAI(http_client=http_client)
         self._ping_headers = {}
 
     async def _ping(self):
@@ -1971,12 +1972,15 @@ A prompter that interfaces with the OpenAI API using Azure.
 
     DEFAULT_VERSION = "2024-06-01"
 
-    def _init_client(self, api_key: str, azure_endpoint: str):
+    def _init_client(
+        self, http_client: httpx.AsyncClient, api_key: str, azure_endpoint: str
+    ):
         self.logger.info("Initializing the Azure API client...")
         self._client = openai.AsyncAzureOpenAI(
             api_key=api_key,
             azure_endpoint=azure_endpoint,
             api_version=self.DEFAULT_VERSION,
+            http_client=http_client,
         )
         self._ping_headers = {"api-key": self._client.api_key}
 
@@ -1987,7 +1991,7 @@ class SnowstormAPI:
     PAGINATION_STEP = 100
     MAX_BAD_PARENT_QUERY = 32
 
-    def __init__(self, url: Url):
+    def __init__(self, url: Url, http_client: httpx.AsyncClient | None = None):
         # Debug
         self.__start_time = datetime.datetime.now()
         self.logger = LOGGER.getChild(self.__class__.__name__)
@@ -1997,7 +2001,7 @@ class SnowstormAPI:
         self.logger.debug(
             f"Snowstorm API URL: {self.url}; initializing async client"
         )
-        self.async_client = httpx.AsyncClient()
+        self.async_client = http_client or httpx.AsyncClient()
         self.logger.info("Snowstorm API client initialized")
 
         # Cache repetitive queries
@@ -2005,8 +2009,10 @@ class SnowstormAPI:
         self.__subsumptions_cache: dict[tuple[SCTID, SCTID], bool] = {}
 
     @classmethod
-    async def init(cls, url: Url) -> SnowstormAPI:
-        snowstorm = cls(url)
+    async def init(
+        cls, url: Url, http_client: httpx.AsyncClient
+    ) -> SnowstormAPI:
+        snowstorm = cls(url, http_client)
 
         snowstorm.logger.info("Testing connection...")
         await snowstorm.ping()
@@ -2826,10 +2832,16 @@ Main logic host for the Bouzyges system.
         self.results: list[WrappedResult] = []
 
     @staticmethod
-    async def read_file(logger, prep_dict, ready_callback) -> None:
+    async def read_file(
+        logger: logging.Logger,
+        http_client: httpx.AsyncClient,
+        prep_dict: dict,
+        ready_callback: Callable,
+    ) -> None:
         """\
 Read the input file and parse it into a list of SemanticPortrait objects.
 """
+        _ = http_client
         # Read file for portraits
         if not PARAMS.read.file:
             raise BouzygesError("No input file specified!")
@@ -2845,13 +2857,20 @@ Read the input file and parse it into a list of SemanticPortrait objects.
         ready_callback()
 
     @staticmethod
-    async def get_snowstorm(logger, prep_dict, ready_callback):
+    async def get_snowstorm(
+        logger: logging.Logger,
+        http_client: httpx.AsyncClient,
+        prep_dict: dict,
+        ready_callback: Callable,
+    ) -> None:
         """\
 Initialize the SnowstormAPI object.
 """
         logger.info("Initializing Snowstorm API...")
         try:
-            snowstorm = await SnowstormAPI.init(PARAMS.api.snowstorm_url)
+            snowstorm = await SnowstormAPI.init(
+                PARAMS.api.snowstorm_url, http_client
+            )
         except Exception as e:
             logger.error("Could not connect to Snowstorm API:", e)
             raise
@@ -2860,7 +2879,12 @@ Initialize the SnowstormAPI object.
         ready_callback()
 
     @staticmethod
-    async def get_prompter(logger, prep_dict, ready_callback):
+    async def get_prompter(
+        logger: logging.Logger,
+        http_client: httpx.AsyncClient,
+        prep_dict: dict,
+        ready_callback: Callable,
+    ):
         logger.info("Initializing prompter...")
         repeat_prompts = (
             DEFAULT_REPEAT_PROMPTS
@@ -2872,6 +2896,7 @@ Initialize the SnowstormAPI object.
             case "openai":
                 prompter = OpenAIPrompter(
                     prompt_format=OpenAIPromptFormat(),
+                    http_client=http_client,
                     repeat_prompts=repeat_prompts,
                     model=PARAMS.api.llm_model_id,
                 )
@@ -2879,6 +2904,7 @@ Initialize the SnowstormAPI object.
             case "azure":
                 prompter = OpenAIAzurePrompter(
                     prompt_format=OpenAIPromptFormat(),
+                    http_client=http_client,
                     repeat_prompts=repeat_prompts,
                     api_key=PARAMS.env.AZURE_API_KEY,
                     azure_endpoint=PARAMS.env.AZURE_API_ENDPOINT,
@@ -2906,11 +2932,17 @@ Initialize the SnowstormAPI object.
         def report_completion():
             progress_callback(len(prep_dict), 3)
 
-        snowstorm_task = cls.get_snowstorm(logger, prep_dict, report_completion)
-        prompter_task = cls.get_prompter(logger, prep_dict, report_completion)
-        read_file_task = cls.read_file(logger, prep_dict, report_completion)
+        limits = httpx.Limits(
+            max_connections=1, max_keepalive_connections=1, keepalive_expiry=0
+        )
+        http_client = httpx.AsyncClient(limits=limits)
+        futures = []
+        for task in (cls.get_snowstorm, cls.get_prompter, cls.read_file):
+            futures.append(
+                task(logger, http_client, prep_dict, report_completion)
+            )
 
-        await asyncio.gather(snowstorm_task, prompter_task, read_file_task)
+        await asyncio.gather(*futures)
         await asyncio.sleep(0.1)  # Let the progress bar catch up
 
         return cls(**prep_dict)
