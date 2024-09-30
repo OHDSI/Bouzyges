@@ -2103,19 +2103,24 @@ raises an exception on non-200 responses.
             parameters_msg.append(f" - args: {json.dumps(args)}")
             parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
             self.logger.debug("\n".join(parameters_msg))
-            response = await self.async_client.get(*args, **kwargs)
+            response = await self.async_client.get(*args, **kwargs, timeout=120)
             self.logger.debug("Success")
             return response
         except Exception as e:
-            # HACK: flush the connections on failure. This why we need to
-            # Move away from Snowstorm and httpx async
+            transport: httpx.AsyncHTTPTransport = self.async_client._transport  # type: ignore
+            pool = transport._pool
+            connections = pool.connections
+            bad_connections = [
+                conn
+                for conn in connections
+                if conn.has_expired or conn.is_closed or conn.is_idle
+            ]
             self.logger.error(
                 f"Failed to connect: {type(e)}. Flushing connections"
             )
-            transport: httpx.AsyncHTTPTransport = self.async_client._transport  # type: ignore
-            await transport._pool._close_connections(
-                transport._pool.connections
-            )
+            await pool._close_connections(bad_connections)
+            for conn in bad_connections:
+                pool._connections.remove(conn)
             raise
 
     async def _get_collect(self, *args, **kwargs) -> list:
@@ -2942,7 +2947,8 @@ Initialize the SnowstormAPI object.
         limits = httpx.Limits(
             max_connections=20, max_keepalive_connections=0, keepalive_expiry=0
         )
-        http_client = httpx.AsyncClient(limits=limits)
+        timeout = httpx.Timeout(60.0)
+        http_client = httpx.AsyncClient(limits=limits, timeout=timeout)
         futures = []
         for task in (cls.get_snowstorm, cls.get_prompter, cls.read_file):
             futures.append(
