@@ -707,6 +707,48 @@ class PrompterInitError(PrompterError):
     """Raised when prompter can not be initialized"""
 
 
+## Hacked Httpx client
+# HACK: Somehow, for whatever reason, the connection pool of Httpx client
+# is constantly filling up with unusable connections. This is a hack to
+# flush the pool on a timeout and continue.
+class HackedAsyncClient(httpx.AsyncClient):
+    """\
+Hacked Httpx client to flush connection pool on timeout.
+"""
+
+    async def get(self, *args, **kwargs):
+        try:
+            return await super().get(*args, **kwargs)
+        except httpx.PoolTimeout as e:
+            transport: httpx.AsyncHTTPTransport = self._transport  # type: ignore
+            pool = transport._pool
+            conns = pool.connections
+            bad_connections = {
+                "closed": [],
+                "expired": [],
+                "idle": [],
+            }
+            for conn in conns:
+                if conn.is_closed:
+                    bad_connections["closed"].append(conn)
+                elif conn.has_expired:
+                    bad_connections["expired"].append(conn)
+                elif conn.is_idle:
+                    bad_connections["idle"].append(conn)
+            LOGGER.error(
+                f"Failed to connect: {type(e)}. Flushing connections from AsyncClient"
+            )
+            for reason, conns in bad_connections.items():
+                LOGGER.error(f"{len(conns)} onnections to close: {reason}")
+                await pool._close_connections(conns)
+                for connection in conns:
+                    pool._connections.remove(connection)
+            raise
+        except Exception as e:
+            LOGGER.error(f"Failed to connect: {type(e)}")
+            raise
+
+
 ## Prompt class
 @dataclass(frozen=True, slots=True)
 class Prompt:
@@ -1773,7 +1815,7 @@ A prompter that interfaces with the OpenAI API using.
                     self._model_id
                 )
             except KeyError:
-                self.logger.warning("Model not found in the token")
+                self.logger.warning("Model not found in the tokenizer")
                 self._estimation_encoding = None
         else:
             self.logger.warning(
@@ -2098,30 +2140,13 @@ raises an exception on non-200 responses.
 
     @retry_fixed
     async def _get_with_retries(self, *args, **kwargs) -> httpx.Response:
-        try:
-            parameters_msg = ["Sending requests with parameters:"]
-            parameters_msg.append(f" - args: {json.dumps(args)}")
-            parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
-            self.logger.debug("\n".join(parameters_msg))
-            response = await self.async_client.get(*args, **kwargs, timeout=120)
-            self.logger.debug("Success")
-            return response
-        except Exception as e:
-            transport: httpx.AsyncHTTPTransport = self.async_client._transport  # type: ignore
-            pool = transport._pool
-            connections = pool.connections
-            bad_connections = [
-                conn
-                for conn in connections
-                if conn.has_expired or conn.is_closed or conn.is_idle
-            ]
-            self.logger.error(
-                f"Failed to connect: {type(e)}. Flushing connections"
-            )
-            await pool._close_connections(bad_connections)
-            for conn in bad_connections:
-                pool._connections.remove(conn)
-            raise
+        parameters_msg = ["Sending requests with parameters:"]
+        parameters_msg.append(f" - args: {json.dumps(args)}")
+        parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
+        self.logger.debug("\n".join(parameters_msg))
+        response = await self.async_client.get(*args, **kwargs, timeout=120)
+        self.logger.debug("Success")
+        return response
 
     async def _get_collect(self, *args, **kwargs) -> list:
         """\
@@ -2948,7 +2973,7 @@ Initialize the SnowstormAPI object.
             max_connections=20, max_keepalive_connections=0, keepalive_expiry=0
         )
         timeout = httpx.Timeout(60.0)
-        http_client = httpx.AsyncClient(limits=limits, timeout=timeout)
+        http_client = HackedAsyncClient(limits=limits, timeout=timeout)
         futures = []
         for task in (cls.get_snowstorm, cls.get_prompter, cls.read_file):
             futures.append(
