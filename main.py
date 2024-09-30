@@ -719,7 +719,7 @@ Hacked Httpx client to flush connection pool on timeout.
     async def get(self, *args, **kwargs):
         try:
             return await super().get(*args, **kwargs)
-        except httpx.PoolTimeout as e:
+        except httpx.HTTPError as e:
             transport: httpx.AsyncHTTPTransport = self._transport  # type: ignore
             pool = transport._pool
             conns = pool.connections
@@ -2831,7 +2831,7 @@ JSON schema:
         if self.append:
             if os.path.exists(self.path):
                 with open(self.path, "r") as f:
-                    existing = json.load(f)
+                    existing = json.load(f)["items"]
         self.logger.debug(f"Existing content of length {len(existing)} loaded")
 
         existing.extend(dicts)
