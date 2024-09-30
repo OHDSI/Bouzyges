@@ -2214,13 +2214,14 @@ Get full concept information.
                 out[sctid] = self.__concepts_cache[sctid]
         sctids -= in_cache
 
-        response = await self._get_collect(
-            url=f"browser/{self.branch_path}/concepts",
-            params={"activeFilter": True, "conceptIds": list(sctids)},
-        )
+        if sctids:
+            response = await self._get_collect(
+                url=f"browser/{self.branch_path}/concepts",
+                params={"activeFilter": True, "conceptIds": list(sctids)},
+            )
 
-        for concept in (Concept.from_json(json_) for json_ in response):
-            out[concept.sctid] = concept
+            for concept in (Concept.from_json(json_) for json_ in response):
+                out[concept.sctid] = concept
 
         return out
 
