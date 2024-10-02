@@ -341,6 +341,7 @@ Parameters for the run of the program.
 
 PARAMS = RunParameters.from_file("default_config.json")
 LOGGER.info(f"Parameters loaded: {json.dumps(PARAMS.model_dump(), indent=2)}")
+LOGGER.setLevel(PARAMS.log.logging_level)
 
 ## Logic constants
 ### MRCM
@@ -2810,8 +2811,7 @@ JSON schema:
         self.logger.debug("Writing to JSON format")
         dicts = []
         for result in results:
-            portrait = result.portrait
-            map = result.name_map
+            portrait, anchors = result.portrait, result.name_map
             row = {
                 "term": portrait.source_term,
                 "attributes": [
@@ -2819,8 +2819,7 @@ JSON schema:
                     for k, v in portrait.attributes.items()
                 ],
                 "proximal_ancestors": [
-                    {"conceptId": k, "pt": map.get(k, "Unknown")}
-                    for k in portrait.ancestor_anchors
+                    {"conceptId": k, "pt": v} for k, v in anchors.items()
                 ],
                 "scg": portrait.to_scg(),
                 "metadata": dict(portrait.metadata),
