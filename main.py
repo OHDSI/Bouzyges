@@ -2395,10 +2395,16 @@ Filter out children that are descendants of bad parents and return the rest.
         if not out:
             return out
 
+        # This function results in modification of the bad_parents set;
+        # It also runs asynchronoously and will also read the bad_parents set;
+        # So we need to make a copy of the set now.
+        # TODO: Reconsider running this function in parallel. It may be faster
+        # because the target set will shrink each iteration.
+        known_bad_parents = set(bad_parents)
+
         # Batch request, because Snowstorm hates long urls
-        # TODO: Parallelize?
         for bad_batch in itertools.batched(
-            bad_parents, self.MAX_BAD_PARENT_QUERY
+            known_bad_parents, self.MAX_BAD_PARENT_QUERY
         ):
             expression = " OR ".join(f"<{b_p}" for b_p in sorted(bad_batch))
             actual_children = await self._get_collect(
