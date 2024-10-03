@@ -1478,7 +1478,9 @@ Interfaces prompts to the LLM agent and parses answers.
                     PARAMS.api.cache_db, check_same_thread=False
                 )
             except Exception as e:
-                self.logger.error("Could not connect (create) to the cache DB")
+                self.logger.error(
+                    "Could not connect (create) to the cache DB", exc_info=e
+                )
                 raise PrompterInitError(e)
 
             self.cache = PromptCache(conn)
@@ -1859,7 +1861,7 @@ A prompter that interfaces with the OpenAI API using.
                 extra_headers=self._ping_headers, timeout=5
             )
         except Exception as e:
-            self.logger.warning(f"Connection timed out: {e}")
+            self.logger.warning(f"Connection timed out: {e}", exc_info=e)
             raise
 
     def ping(self) -> bool:
@@ -1958,7 +1960,7 @@ A prompter that interfaces with the OpenAI API using.
                 **(prompt.api_options or {}),
             )
         except openai.APIError as e:
-            self.logger.error(f"API error: {e}")
+            self.logger.error(f"API error: {e}", exc_info=e)
             raise PrompterError("Failed to get a response from the API")
 
         response_message = brain_answer.choices[0].message.content
@@ -1989,7 +1991,8 @@ A prompter that interfaces with the OpenAI API using.
             if parse_retries_left > 0:
                 self.logger.warning(
                     f"Retrying parsing the answer, "
-                    f"attempts left: {parse_retries_left}"
+                    f"attempts left: {parse_retries_left}",
+                    exc_info=e,
                 )
                 return await self._prompt_answer(
                     prompt, parser, attempt, parse_retries_left - 1
@@ -2104,7 +2107,9 @@ class SnowstormAPI:
             self.logger.info("Snowstorm Version: " + await self.get_version())
             self.branch_path: BranchPath = await self.get_main_branch_path()
         except Exception as e:
-            self.logger.error(f"Could not get branch from Snowstorm API: {e}")
+            self.logger.error(
+                f"Could not get branch from Snowstorm API: {e}", exc_info=e
+            )
             raise
         # Log the version
         self.logger.info("Using branch path: " + self.branch_path)
@@ -2141,7 +2146,9 @@ raises an exception on non-200 responses.
         try:
             response = await self._get_with_retries(*args, **kwargs)
         except Exception as e:
-            self.logger.error(f"Could not connect to Snowstorm API: {e}")
+            self.logger.error(
+                f"Could not connect to Snowstorm API: {e}", exc_info=e
+            )
             raise
 
         if not response.status_code < 400:
@@ -2603,7 +2610,7 @@ Read the file
                 quotechar=PARAMS.read.quotechar,
             )
         except Exception as e:
-            self.logger.error(f"Could not read {self.path}: {e}")
+            self.logger.error(f"Could not read {self.path}: {e}", exc_info=e)
             raise
 
         self.logger.info(f"Read {len(df)} rows from {self.path}")
@@ -2714,7 +2721,9 @@ A class to write resulting files.
                 mode="a" if self.append else "w",
             )
         except Exception as e:
-            self.logger.error(f"Could not write to {self.path}: {e}")
+            self.logger.error(
+                f"Could not write to {self.path}: {e}", exc_info=e
+            )
             raise
 
         self.logger.info(f"Written to {self.path}")
@@ -2864,7 +2873,9 @@ JSON schema:
             try:
                 json.dump(self.content, f, indent=2)
             except Exception as e:
-                self.logger.error(f"Could not write to {self.path}: {e}")
+                self.logger.error(
+                    f"Could not write to {self.path}: {e}", exc_info=e
+                )
                 raise
 
         self.logger.info(f"Written to {self.path}")
@@ -2931,7 +2942,7 @@ Initialize the SnowstormAPI object.
                 PARAMS.api.snowstorm_url, http_client
             )
         except Exception as e:
-            logger.error("Could not connect to Snowstorm API:", e)
+            logger.error("Could not connect to Snowstorm API", exc_info=e)
             raise
         prep_dict["snowstorm"] = snowstorm
         logger.info("SNOWSTORM API INITIALIZED")
@@ -3101,7 +3112,7 @@ Run the worker thread.
         try:
             return await self._run(report_progress)
         except Exception as e:
-            self.logger.error(f"An error occurred: {e}")
+            self.logger.error(f"An error occurred: {e}", exc_info=e)
             raise
         finally:
             self.logger.info(
