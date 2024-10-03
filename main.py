@@ -138,11 +138,21 @@ LOGGER.info("Logging configured")
 
 
 ## Request retrying decorators
+def log_retry_error(state: tenacity.RetryCallState) -> None:
+    result = state.outcome
+    if result and result.failed:
+        exception = result.exception()
+        LOGGER.error(f"Retry failed: {result}", exc_info=exception)
+
+
 retry_exponential = tenacity.retry(
-    wait=tenacity.wait_random_exponential(multiplier=1, max=60)
+    wait=tenacity.wait_random_exponential(multiplier=1, max=60),
+    retry_error_callback=log_retry_error,
 )
 retry_fixed = tenacity.retry(
-    wait=tenacity.wait_fixed(15), stop=tenacity.stop_never
+    wait=tenacity.wait_fixed(15),
+    stop=tenacity.stop_never,
+    retry_error_callback=log_retry_error,
 )
 
 ## Parameters
@@ -717,9 +727,9 @@ class HackedAsyncClient(httpx.AsyncClient):
 Hacked Httpx client to flush connection pool on timeout.
 """
 
-    async def get(self, *args, **kwargs):
+    async def send(self, *args, **kwargs):
         try:
-            return await super().get(*args, **kwargs)
+            return await super().send(*args, **kwargs)
         except httpx.HTTPError as e:
             transport: httpx.AsyncHTTPTransport = self._transport  # type: ignore
             pool = transport._pool
@@ -737,7 +747,9 @@ Hacked Httpx client to flush connection pool on timeout.
                 elif conn.is_idle:
                     bad_connections["idle"].append(conn)
             LOGGER.error(
-                f"Failed to connect: {type(e)}. Flushing connections from AsyncClient"
+                f"Failed to connect: {type(e)}. Flushing connections "
+                f"from AsyncClient",
+                exc_info=e,
             )
             for reason, conns in bad_connections.items():
                 LOGGER.error(f"{len(conns)} onnections to close: {reason}")
@@ -746,7 +758,7 @@ Hacked Httpx client to flush connection pool on timeout.
                     pool._connections.remove(connection)
             raise
         except Exception as e:
-            LOGGER.error(f"Failed to connect: {type(e)}")
+            LOGGER.error(f"Failed to connect: {type(e)}", exc_info=e)
             raise
 
 
@@ -1430,12 +1442,13 @@ enough correct answers are received.
         attempt = 1
         winning_attempts = math.ceil(self.min_attempts / 2)
         options_count: Counter[SCTDescription | bool | EscapeHatch] = Counter()
-        kwargs["attempt"] = attempt
         while True:
+            kwargs["attempt"] = attempt
             answer = await method(self, *args, **kwargs)
             options_count.update([answer])
             if options_count[answer] >= winning_attempts:
                 return answer
+            attempt += 1
 
     return wrapper
 
@@ -1834,7 +1847,10 @@ A prompter that interfaces with the OpenAI API using.
                 f"Can not initialize {self} without OPENAI_API_KEY"
             )
 
-        self._client = openai.AsyncOpenAI(http_client=http_client)
+        self._client = openai.AsyncOpenAI(
+            http_client=http_client,
+            max_retries=1,  # Retry only once, as we have our own retry logic
+        )
         self._ping_headers = {}
 
     async def _ping(self):
