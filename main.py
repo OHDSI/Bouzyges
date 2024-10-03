@@ -934,7 +934,8 @@ Abstract class for formatting prompts for the LLM agent.
         "the pulmonary tuberculosis?', and the options are [Lung structure], "
         "[Heart structure], [Kidney structure], the good answer would end with"
         "[Lung structure].' Answers that do not include reasoning are "
-        "unacceptable."
+        "unacceptable. Incorrect answers will be penalized: if a source term "
+        "does contain a specific attribute, you must answer so."
     )
 
     ESCAPE_INSTRUCTIONS = (
@@ -1271,7 +1272,11 @@ Outputs prompts as JSONs and contains sensible API option defaults.
         prompt.append(
             (
                 "user",
-                f"Is the attribute '{attribute}' present in the term '{term}'?",
+                f"Can the attribute '{attribute}' be safely assumed to be "
+                f"present in the term '{term}'? The value of the attribute "
+                f"itself is not important, and may be vaguely or ambiguously "
+                f"defined, the question is about the presence of the attribute "
+                f"itself.",
             )
         )
         if term_context:
