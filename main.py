@@ -752,7 +752,9 @@ Hacked Httpx client to flush connection pool on timeout.
                 exc_info=e,
             )
             for reason, conns in bad_connections.items():
-                LOGGER.error(f"{len(conns)} onnections to close: {reason}")
+                if not conns:
+                    continue
+                LOGGER.error(f"{len(conns)} connections to close: {reason}")
                 await pool._close_connections(conns)
                 for connection in conns:
                     pool._connections.remove(connection)
@@ -2131,13 +2133,6 @@ raises an exception on non-200 responses.
             if seconds > PARAMS.prof.stop_profiling_after_seconds:
                 raise ProfileMark("Time limit exceeded")
 
-        parameters_msg = [
-            "Modifying requests with parameters:",
-            f" - args: {json.dumps(args)}",
-            f" - kwargs: {json.dumps(kwargs, indent=2)}",
-        ]
-        self.logger.debug("\n".join(parameters_msg))
-
         # Include the known url
         if "url" not in kwargs:
             args = (self.url + args[0], *args[1:])
@@ -2168,12 +2163,8 @@ raises an exception on non-200 responses.
 
     @retry_fixed
     async def _get_with_retries(self, *args, **kwargs) -> httpx.Response:
-        parameters_msg = ["Sending requests with parameters:"]
-        parameters_msg.append(f" - args: {json.dumps(args)}")
-        parameters_msg.append(f" - kwargs: {json.dumps(kwargs, indent=2)}")
-        self.logger.debug("\n".join(parameters_msg))
         response = await self.async_client.get(*args, **kwargs, timeout=120)
-        self.logger.debug("Success")
+        self.logger.debug("Success for %s", response.url)
         return response
 
     async def _get_collect(self, *args, **kwargs) -> list:
