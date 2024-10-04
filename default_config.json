@@ -22,10 +22,10 @@
     "quoting": 0
   },
   "write": {
-    "file": "bouzyges_output.csv",
+    "file": "bouzyges_output.json",
     "sep": "Tab",
     "quotechar": "\"",
     "quoting": 0
   },
-  "format": "SCG"
+  "format": "JSON"
 }
