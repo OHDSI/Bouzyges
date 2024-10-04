@@ -2523,20 +2523,17 @@ manually/with LLM.
             parent_predicate.sctid
         )
 
-        async def check_anchor(anchor):
-            nonlocal unmatched_predicate_ppp
+        for anchor in portrait.ancestor_anchors:
             if not unmatched_predicate_ppp:
-                return
+                # All matched, escape early
+                continue
             anchor_matched_ppp = set()
 
-            async def check_ppp(ppp):
+            for ppp in unmatched_predicate_ppp:
                 if await self.is_concept_descendant_of(anchor, ppp):
                     anchor_matched_ppp.add(ppp)
 
-            await asyncio.gather(*map(check_ppp, unmatched_predicate_ppp))
             unmatched_predicate_ppp -= anchor_matched_ppp
-
-        await asyncio.gather(*map(check_anchor, portrait.ancestor_anchors))
 
         if unmatched_predicate_ppp:
             self.logger.debug(
