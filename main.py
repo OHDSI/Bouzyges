@@ -1563,10 +1563,9 @@ Assumes that the answer is a valid option if it is wrapped in brackets.
         """\
 Check if the answer contains a yes or no option.
 """
-        last_line = answer.strip().splitlines()[-1]
-        if yes in last_line and no not in last_line:
+        if yes in answer and no not in answer:
             return True
-        elif no in last_line and yes not in last_line:
+        elif no in answer and yes not in answer:
             return False
         else:
             raise PrompterError(
