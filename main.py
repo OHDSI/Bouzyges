@@ -3382,6 +3382,10 @@ otherwise.
             )
 
             if not is_inferrable_supertype:
+                self.logger.debug(
+                    f"{child.sctid} {child.pt} can not be inferred as a "
+                    f"supertype of {self.source_term}"
+                )
                 self.portrait.rejected_supertypes.add(child.sctid)
                 continue
 
@@ -3399,10 +3403,17 @@ otherwise.
                     prospective_supertype=child.pt,
                     term_context=source_term_context,
                 ):
+                    self.logger.debug(
+                        f"{child.sctid} {child.pt} is not a supertype of "
+                        f"{self.source_term} according to the agent"
+                    )
                     self.portrait.rejected_supertypes.add(child.sctid)
-                continue
+                    continue
 
             # Child is confirmed by ontology inference and the agent
+            self.logger.debug(
+                f"Adding {child.sctid} {child.pt} as a new ancestor"
+            )
             new_anchors.add(child.sctid)
 
         if not new_anchors:
@@ -3410,9 +3421,7 @@ otherwise.
             return False
 
         # Update the anchor set with the new one
-        self.logger.debug(
-            f"New ancestors: {new_anchors - self.portrait.ancestor_anchors}"
-        )
+        self.logger.debug(f"New ancestors: {new_anchors}")
         self.portrait.ancestor_anchors |= new_anchors
         return True
 
