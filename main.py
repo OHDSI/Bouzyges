@@ -98,6 +98,9 @@ than hallucinating an answer. Will have just one singleton instance.
 
     WORD: SCTDescription = SCTDescription("[NONE]")
 
+    def __str__(self) -> str:
+        return self.WORD
+
 
 class BooleanAnswer(str):
     """\
@@ -2553,9 +2556,10 @@ manually/with LLM.
                 break
 
         if unmatched := len(unmatched_concept_relationships):
-            self.logger.debug(
-                f"Does not satisfy {unmatched} attribute constraints"
-            )
+            msg = [f"Does not satisfy {unmatched} attribute constraints:"]
+            for rel in unmatched_concept_relationships:
+                msg.append(f" - {rel.attribute} = {rel.value}")
+            self.logger.debug("\n".join(msg))
             return False
 
         self.logger.debug("All constraints are satisfied")
