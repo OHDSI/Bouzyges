@@ -3356,68 +3356,66 @@ otherwise.
 """
         new_anchors = set()
 
-        async def process_anchor(anchor):
+        # Gather all children of currently known descendants:
+        all_children: set[SCTID] = set()
+        for anchor in self.portrait.ancestor_anchors:
             # Get all immediate descendants
             children_set: set[SCTID] = set(
                 await self.snowstorm.get_concept_children(anchor)
             )
+            all_children |= children_set
 
-            # Remove verbatim known ancestors
-            children_set -= self.portrait.ancestor_anchors
+        self.logger.debug(f"Filtering {len(all_children)} children")
+        # Remove verbatim known ancestors
+        all_children -= self.portrait.ancestor_anchors
 
-            # Filter previously rejected ancestors including meta-ancestors
-            remaining = await self.snowstorm.filter_bad_descendants(
-                children=children_set,
-                bad_parents=self.portrait.rejected_supertypes,
-            )
+        # Filter previously rejected ancestors including meta-ancestors
+        remaining = await self.snowstorm.filter_bad_descendants(
+            children=all_children,
+            bad_parents=self.portrait.rejected_supertypes,
+        )
 
-            # Save the rejected children as rejected ancestors
-            self.portrait.rejected_supertypes.update(children_set - remaining)
+        # Save the rejected children as rejected supertypes
+        self.portrait.rejected_supertypes.update(all_children - remaining)
 
-            children: dict[SCTID, Concept] = await self.snowstorm.get_concepts(
-                remaining
-            )
-            self.logger.debug(f"Filtering {len(children)} children of {anchor}")
+        good_children: dict[SCTID, Concept] = await self.snowstorm.get_concepts(
+            remaining
+        )
 
-            self.logger.debug(f"Filtered to {len(children)}")
+        self.logger.debug(f"Filtered to {len(good_children)}")
 
-            # Iterate over descendants and ask LLM/Snowstorm if to include them
-            # to the new anchors
-            async def process_child(child: Concept):
-                supertype: bool = (
-                    await self.snowstorm.check_inferred_subsumption(
-                        child, self.portrait
-                    )
+        # Iterate over descendants and ask LLM/Snowstorm if to include them
+        # to the new anchors
+        for child in good_children.values():
+            is_inferrable_supertype: bool = (
+                await self.snowstorm.check_inferred_subsumption(
+                    child, self.portrait
                 )
+            )
 
-                if not supertype:
-                    # This will prevent expensive re-queries on descendants
-                    self.portrait.rejected_supertypes.add(child.sctid)
-                    return
+            if not is_inferrable_supertype:
+                self.portrait.rejected_supertypes.add(child.sctid)
+                continue
 
-                # Primitive concepts must be confirmed by the LLM
-                primitive = not child.defined
+            # Primitive concepts must be confirmed by the LLM
+            primitive = not child.defined
+            if primitive:
                 source_term_context = (
                     "; ".join(self.portrait.context)
                     if self.portrait.context
                     else None
                 )
-                if primitive:
-                    if not await self.prompter.prompt_subsumption(
-                        self.portrait.source_term,
-                        prospective_supertype=child.pt,
-                        term_context=source_term_context,
-                    ):
-                        self.portrait.rejected_supertypes.add(child.sctid)
-                    return
 
-                new_anchors.add(child.sctid)
+                if not await self.prompter.prompt_subsumption(
+                    self.portrait.source_term,
+                    prospective_supertype=child.pt,
+                    term_context=source_term_context,
+                ):
+                    self.portrait.rejected_supertypes.add(child.sctid)
+                continue
 
-            await asyncio.gather(*map(process_child, children.values()))
-
-        await asyncio.gather(
-            *map(process_anchor, self.portrait.ancestor_anchors)
-        )
+            # Child is confirmed by ontology inference and the agent
+            new_anchors.add(child.sctid)
 
         if not new_anchors:
             self.logger.debug("No new ancestors found")
