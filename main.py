@@ -2680,7 +2680,9 @@ A class to write resulting files.
         self.content: pd.DataFrame | Json | None = None
         self.append = append
 
-        self.write_chosen: Callable[[Iterable[WrappedResult]], None]
+        self.write_chosen: Callable[
+            [Iterable[WrappedResult], SnowstormAPI], Coroutine
+        ]
         match format:
             case "SCG":
                 self.write_chosen = self.to_snomed_compositional_grammar
@@ -2724,8 +2726,8 @@ A class to write resulting files.
 
         self.logger.info(f"Written to {self.path}")
 
-    def to_snomed_compositional_grammar(
-        self, results: Iterable[WrappedResult]
+    async def to_snomed_compositional_grammar(
+        self, results: Iterable[WrappedResult], snowstorm: SnowstormAPI
     ) -> None:
         """\
 Write the results of term evaluation as a table of SNOMED CT Post-Coordinated
@@ -2736,6 +2738,10 @@ some tools like CSIRO Ontoserver can do that. Unfortunately, normalization rules
 are not formally defined.
 """
         self.logger.debug("Writing to SCG format")
+
+        # TODO: use Snowstorm for annotations
+        _ = snowstorm
+
         dicts = []
         for result in results:
             portrait, map_ = result.portrait, result.name_map
@@ -2757,8 +2763,8 @@ are not formally defined.
             self.content = pd.DataFrame(dicts)
         self._write_csv()
 
-    def to_concept_relationship_stage(
-        self, results: Iterable[WrappedResult]
+    async def to_concept_relationship_stage(
+        self, results: Iterable[WrappedResult], snowstorm: SnowstormAPI
     ) -> None:
         """\
 Write the results of term evaluation as a table in format of of OMOP CDM
@@ -2773,6 +2779,10 @@ This will also not check for duplicates in `code` and `vocab` columns, nor any
 other constraints.
 """
         self.logger.debug("Writing to CONCEPT_RELATIONSHIP_STAGE format")
+
+        # TODO: use Snowstorm for annotations
+        _ = snowstorm
+
         dicts = []
         today = datetime.date.today().strftime("%Y-%m-%d")
         for result in results:
@@ -2805,7 +2815,9 @@ other constraints.
         self.content = pd.DataFrame(dicts)
         self._write_csv()
 
-    def to_json(self, results: Iterable[WrappedResult]) -> None:
+    async def to_json(
+        self, results: Iterable[WrappedResult], snowstorm: SnowstormAPI
+    ) -> None:
         """\
 Write the results of term evaluation as a JSON file.
 
@@ -2816,8 +2828,14 @@ JSON schema:
                 "term": "Pyogenic abscess of liver",
                 "attributes": [
                     {
-                        "attribute": 363698007,
-                        "value": 10200004
+                        "attribute": {
+                            "id": 363698007,
+                            "pt": "Finding site"
+                        },
+                        "value": {
+                            "id": 10200004,
+                            "pt": "Liver structure"
+                        }
                     },
                     ...
                 ],
@@ -2837,14 +2855,32 @@ JSON schema:
 """
         self.logger.debug("Writing to JSON format")
         dicts = []
+        annotations: dict[SCTID, str] = {}
+
         for result in results:
             portrait, anchors = result.portrait, result.name_map
+
+            # Annotate attributes
+            concepts = {
+                *portrait.attributes.keys(),
+                *portrait.attributes.values(),
+            }
+            new_concepts = concepts - set(annotations)
+            new_annotations = await snowstorm.get_concepts(new_concepts)
+            annotations.update({k: v.pt for k, v in new_annotations.items()})
+
+            attributes = []
+            for k_id, v_id in portrait.attributes.items():
+                attributes.append(
+                    {
+                        "attribute": {"id": k_id, "pt": annotations[k_id]},
+                        "value": {"id": v_id, "pt": annotations[v_id]},
+                    }
+                )
+
             row = {
                 "term": portrait.source_term,
-                "attributes": [
-                    {"attribute": k, "value": v}
-                    for k, v in portrait.attributes.items()
-                ],
+                "attributes": attributes,
                 "proximal_ancestors": [
                     {"conceptId": k, "pt": v} for k, v in anchors.items()
                 ],
@@ -3158,7 +3194,7 @@ Run the worker thread.
 
         result = WrappedResult(self.portrait, anchors)
         self.logger.info("Worker finished, writing result")
-        self.writer.write_chosen([result])
+        await self.writer.write_chosen([result], self.snowstorm)
         report_progress(self)
         return result
 
