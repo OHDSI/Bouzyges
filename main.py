@@ -18,6 +18,19 @@ from abc import ABC, abstractmethod
 from collections import Counter
 from dataclasses import dataclass
 from functools import wraps
+from utils.constants import (
+    AVAILABLE_PROMPTERS,
+    CSV_SEPARATORS,
+    QUOTING_POLICY,
+    DEFAULT_MODEL,
+    MRCM_DOMAIN_REFERENCE_SET_ECL,
+    WHITELISTED_SUPERTYPES,
+    NULL_ANSWER,
+    IS_A,
+)
+
+from utils.logger import LOGGER, FORMATTER
+
 from typing import (
     Any,
     Callable,
@@ -26,9 +39,16 @@ from typing import (
     Literal,
     Mapping,
     Self,
-    TypeAlias,
     TypeVar,
     Union,
+)
+from utils.exceptions import (
+    ProfileMark,
+    BouzygesError,
+    SnowstormAPIError,
+    SnowstormRequestError,
+    PrompterError,
+    PrompterInitError,
 )
 
 import httpx
@@ -40,6 +60,26 @@ import webbrowser
 from frozendict import frozendict
 import qasync
 from PyQt6 import QtCore, QtGui, QtWidgets
+from utils.types import (
+    BranchPath,
+    PrompterOption,
+    Url,
+    OutFormat,
+    ECLExpression,
+    SCTID,
+    EscapeHatch,
+    SCTDescription,
+    JsonPrimitive,
+    SCGExpression,
+    ROOT_CONCEPT,
+    DEFAULT_REPEAT_PROMPTS,
+    OpenAIMessages,
+    JsonDict,
+    BooleanAnswer,
+    OpenAIPromptRole,
+    T,
+    Json,
+)
 
 # Optional imports
 ## dotenv
@@ -61,83 +101,6 @@ except ImportError:
         "Will not be able to use track token usage"
     )
     tiktoken = None
-
-
-# Boilerplate
-## Typing
-class BranchPath(str):
-    """Snowstorm working branch"""
-
-
-class SCTID(int):
-    """SNOMED CT identifier"""
-
-
-class SCTDescription(str):
-    """Any of valid SNOMED CT descriptions
-
-    Prefer PT for LLMs and FSN for humans.
-    """
-
-
-class ECLExpression(str):
-    """Expression Constraint Language expression"""
-
-
-class SCGExpression(str):
-    """SNOMED CT Compositional Grammar expression"""
-
-
-class EscapeHatch(object):
-    """\
-"Escape hatch" sentinel type for prompters
-
-Escape hatch is provided to an LLM agent to be able to choose nothing rather
-than hallucinating an answer. Will have just one singleton instance.
-"""
-
-    WORD: SCTDescription = SCTDescription("[NONE]")
-
-    def __str__(self) -> str:
-        return self.WORD
-
-
-class BooleanAnswer(str):
-    """\
-Boolean answer constants for prompters for yes/no questions
-"""
-
-    YES = SCTDescription("[AYE]")
-    NO = SCTDescription("[NAY]")
-
-    def __new__(cls, value: bool):
-        return cls.YES if value else cls.NO
-
-
-PrompterOption: TypeAlias = Literal["human", "openai", "azure"]
-JsonPrimitive: TypeAlias = int | float | str | bool | None
-Json: TypeAlias = dict[str, "Json"] | list["Json"] | JsonPrimitive
-JsonDict: TypeAlias = dict[str, Json]
-OpenAIPromptRole: TypeAlias = Literal["user", "system", "assisstant"]
-OpenAIMessages: TypeAlias = tuple[frozendict[OpenAIPromptRole, str]]
-OutFormat: TypeAlias = Literal["SCG", "CRS", "JSON"]
-T = TypeVar("T")
-Url = str
-
-## Logging
-LOGGER = logging.getLogger("Bouzyges")
-logging.basicConfig(level=logging.INFO)
-LOGGER.info("Logging started")
-# Default handler and formatter
-LOGGER.handlers.clear()
-_stdout_handler = logging.StreamHandler(sys.stdout)
-_formatter = logging.Formatter(
-    "[%(asctime)s] %(levelname)s [%(name)s.%(funcName)s:%(lineno)d] "
-    "%(message)s"
-)
-_stdout_handler.setFormatter(_formatter)
-LOGGER.addHandler(_stdout_handler)
-LOGGER.info("Logging configured")
 
 
 ## Request retrying decorators
@@ -166,25 +129,6 @@ if dotenv is not None:
         dotenv.load_dotenv()
     else:
         LOGGER.warning("No .env file found")
-
-DEFAULT_MODEL = "gpt-4o-mini"
-AVAILABLE_PROMPTERS: dict[PrompterOption, str] = {
-    "openai": "OpenAI",
-    "azure": "Azure OpenAI",
-    "human": "Human",
-}
-CSV_SEPARATORS: dict[str, str] = {
-    ",": ",",
-    ";": ";",
-    "Tab": "\t",
-}
-QUOTECHARS: list[str] = ['"', "'"]
-QUOTING_POLICY: dict[int, str] = {
-    csv.QUOTE_MINIMAL: "Quote minimal",
-    csv.QUOTE_ALL: "Quote all",
-    csv.QUOTE_NONNUMERIC: "Quote string",
-    csv.QUOTE_NONE: "No quoting",
-}
 
 
 class ProfilingParameters(pydantic.BaseModel):
@@ -355,34 +299,6 @@ Parameters for the run of the program.
 PARAMS = RunParameters.from_file("default_config.json")
 LOGGER.info(f"Parameters loaded: {json.dumps(PARAMS.model_dump(), indent=2)}")
 LOGGER.setLevel(PARAMS.log.logging_level)
-
-## Logic constants
-### MRCM
-MRCM_DOMAIN_REFERENCE_SET_ECL = ECLExpression("<<723589008")
-WHITELISTED_SUPERTYPES: set[SCTID] = {
-    # Only limit to well-modeled supertypes for now
-    SCTID(404684003),  # Clinical finding
-    SCTID(71388002),  # Procedure
-}
-
-### Escape hatch sentinel
-NULL_ANSWER = EscapeHatch()
-
-
-### "Is a" relationships
-IS_A = SCTID(116680003)
-
-
-### SNOMED root concept
-ROOT_CONCEPT = SCTID(138875005)
-
-
-### Temporary substitute for reading from a file
-TERMS = ["Pyogenic abscess of liver", "Invasive lobular carcinoma of breast"]
-
-
-### Default prompt repetition count
-DEFAULT_REPEAT_PROMPTS: int | None = 3
 
 
 ## Dataclasses
@@ -678,47 +594,6 @@ Represents a completed semantic portrait with additional metadata.
     ) -> None:
         self.portrait: SemanticPortrait = portrait
         self.name_map: Mapping[SCTID, SCTDescription] = name_map
-
-
-## Exceptions
-class ProfileMark(Exception):
-    """Interrupts flow of the program at arbitrary point for profiling"""
-
-
-class BouzygesError(Exception):
-    """Base class for Bouzyges errors."""
-
-
-class SnowstormAPIError(Exception):
-    """Raised when the Snowstorm API returns a bad response."""
-
-
-class SnowstormRequestError(SnowstormAPIError):
-    """Raised when the Snowstorm API returns a non-200 response"""
-
-    def __init__(self, text, response, *_):
-        super().__init__(text)
-        self.response = response
-
-    @classmethod
-    def from_response(cls, response):
-        LOGGER.error(
-            f"Request: {response.request.method}, {response.request.url}"
-        )
-        if response:
-            LOGGER.error(f"Response: {json.dumps(response.json(), indent=2)}")
-        return cls(
-            f"Snowstorm API returned {response.status_code} status code",
-            response,
-        )
-
-
-class PrompterError(Exception):
-    """Raised when the prompter encounters an error."""
-
-
-class PrompterInitError(PrompterError):
-    """Raised when prompter can not be initialized"""
 
 
 ## Hacked Httpx client
@@ -1058,7 +933,7 @@ Contains no API options and only string prompts, intended for human prompters.
             prompt += "\n"
         # Remind of the escape hatch, just in case
         if allow_escape:
-            prompt += f" - {EscapeHatch.WORD}: " "None of the above\n"
+            prompt += f" - {EscapeHatch.WORD}: None of the above\n"
         return Prompt(
             prompt,
             frozenset(options),
@@ -1120,7 +995,7 @@ Contains no API options and only string prompts, intended for human prompters.
                 prompt += f": {options_context[option]}"
             prompt += "\n"
         # Remind of the escape hatch, just in case
-        prompt += f" - {EscapeHatch.WORD}: " "None of the above\n"
+        prompt += f" - {EscapeHatch.WORD}: None of the above\n"
         return Prompt(prompt, frozenset(options), EscapeHatch.WORD)
 
     def form_subsumption(
@@ -1256,7 +1131,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
             options_text += "\n"
         # Remind of the escape hatch, just in case
         if allow_escape:
-            options_text += f" - {EscapeHatch.WORD}: " "None of the above\n"
+            options_text += f" - {EscapeHatch.WORD}: None of the above\n"
 
         prompt.append(("user", options_text))
 
@@ -1367,7 +1242,7 @@ Outputs prompts as JSONs and contains sensible API option defaults.
             options_text += "\n"
         # Remind of the escape hatch, just in case
         if allow_escape:
-            options_text += f" - {EscapeHatch.WORD}: " "None of the above\n"
+            options_text += f" - {EscapeHatch.WORD}: None of the above\n"
 
         prompt.append(("user", options_text))
 
@@ -3485,7 +3360,7 @@ A logging handler that outputs log records to a QListView widget.
             QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
         )
 
-        self.setFormatter(_formatter)
+        self.setFormatter(FORMATTER)
 
     def emit(self, record):
         msg = self.format(record)
@@ -3782,7 +3657,7 @@ Main window and start config for the Bouzyges system.
             file_name = f"bouzyges-{date_str}.log"
             log_file = os.path.join(self.output_dir.text(), file_name)
             file_handler = logging.FileHandler(log_file)
-            file_handler.setFormatter(_formatter)
+            file_handler.setFormatter(FORMATTER)
 
             LOGGER.addHandler(file_handler)
             self.logger.info(f"Now logging to file: {log_file}")
