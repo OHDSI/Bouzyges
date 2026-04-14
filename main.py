@@ -60,6 +60,10 @@ import webbrowser
 from frozendict import frozendict
 import qasync
 from PyQt6 import QtCore, QtGui, QtWidgets
+from utils.constants import (
+    ROOT_CONCEPT,
+    DEFAULT_REPEAT_PROMPTS,
+)
 from utils.types import (
     BranchPath,
     PrompterOption,
@@ -71,8 +75,6 @@ from utils.types import (
     SCTDescription,
     JsonPrimitive,
     SCGExpression,
-    ROOT_CONCEPT,
-    DEFAULT_REPEAT_PROMPTS,
     OpenAIMessages,
     JsonDict,
     BooleanAnswer,
