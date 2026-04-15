@@ -42,4 +42,4 @@ IS_A = SCTID(116680003)
 ROOT_CONCEPT = SCTID(138875005)
 
 ### Default prompt repetition count
-DEFAULT_REPEAT_PROMPTS: int | None = 3
+DEFAULT_REPEAT_PROMPTS: int = 3

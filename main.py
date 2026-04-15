@@ -7,17 +7,12 @@ import datetime
 import itertools
 import json
 import logging
-import math
 import os
 import pstats
 import re
-import sqlite3
 import sys
 import unittest
-from abc import ABC, abstractmethod
-from collections import Counter
 from dataclasses import dataclass
-from functools import wraps
 from utils.constants import (
     AVAILABLE_PROMPTERS,
     CSV_SEPARATORS,
@@ -25,45 +20,36 @@ from utils.constants import (
     DEFAULT_MODEL,
     MRCM_DOMAIN_REFERENCE_SET_ECL,
     WHITELISTED_SUPERTYPES,
-    NULL_ANSWER,
     IS_A,
 )
+from parameters import EnvironmentParameters, IOParameters, PARAMS
 
 from utils.logger import LOGGER, FORMATTER
+from utils.decorators import retry_fixed
 
 from typing import (
-    Any,
     Callable,
     Coroutine,
     Iterable,
     Literal,
     Mapping,
     Self,
-    TypeVar,
-    Union,
 )
 from utils.exceptions import (
     ProfileMark,
     BouzygesError,
     SnowstormAPIError,
     SnowstormRequestError,
-    PrompterError,
-    PrompterInitError,
 )
 
 import httpx
-import openai
 import pandas as pd
-import pydantic
-import tenacity
 import webbrowser
 from frozendict import frozendict
 import qasync
 from PyQt6 import QtCore, QtGui, QtWidgets
 from prompt import (
     OpenAIPromptFormat,
-    Prompt,
-    PromptFormat,
     VerbosePromptFormat,
 )
 from utils.constants import (
@@ -72,7 +58,6 @@ from utils.constants import (
 )
 from utils.types import (
     BranchPath,
-    PrompterOption,
     Url,
     OutFormat,
     ECLExpression,
@@ -81,9 +66,14 @@ from utils.types import (
     SCTDescription,
     JsonPrimitive,
     SCGExpression,
-    BooleanAnswer,
-    T,
     Json,
+)
+
+from prompter import (
+    Prompter,
+    OpenAIAzurePrompter,
+    OpenAIPrompter,
+    HumanPrompter,
 )
 
 # Optional imports
@@ -97,35 +87,6 @@ except ImportError:
     )
     dotenv = None
 
-## tiktoken
-try:
-    import tiktoken
-except ImportError:
-    logging.warning(
-        "tiktoken package is not installed. "
-        "Will not be able to use track token usage"
-    )
-    tiktoken = None
-
-
-## Request retrying decorators
-def log_retry_error(state: tenacity.RetryCallState) -> None:
-    result = state.outcome
-    if result and result.failed:
-        exception = result.exception()
-        LOGGER.error(f"Retry failed: {result}", exc_info=exception)
-
-
-retry_exponential = tenacity.retry(
-    wait=tenacity.wait_random_exponential(multiplier=1, max=60),
-    retry_error_callback=log_retry_error,
-)
-retry_fixed = tenacity.retry(
-    wait=tenacity.wait_fixed(15),
-    stop=tenacity.stop_never,
-    retry_error_callback=log_retry_error,
-)
-
 ## Parameters
 # Load environment variables for API access
 if dotenv is not None:
@@ -134,67 +95,6 @@ if dotenv is not None:
         dotenv.load_dotenv()
     else:
         LOGGER.warning("No .env file found")
-
-
-class ProfilingParameters(pydantic.BaseModel):
-    """\
-Parameters to control profiling of the program.
-"""
-
-    enabled: bool
-    stop_profiling_after_seconds: int | None
-
-
-class LoggingParameters(pydantic.BaseModel):
-    """\
-Parameters to control logging.
-"""
-
-    log_to_file: bool
-    logging_level: int
-
-    def update(self, level):
-        self.logging_level = level
-        LOGGER.setLevel(level=self.logging_level)
-
-
-class APIParameters(pydantic.BaseModel):
-    """\
-Parameters to control the interface to Snowstorm, cache and LLMs.
-"""
-
-    prompter: PrompterOption
-    repeat_prompts: int | None
-    snowstorm_url: Url
-    llm_model_id: str
-    cache_db: str | None
-    max_concurrent_workers: int
-
-
-class EnvironmentParameters(pydantic.BaseModel):
-    """\
-Parameters that reflect the environment variables.
-"""
-
-    OPENAI_API_KEY: str | None = None
-    AZURE_API_KEY: str | None = None
-    AZURE_API_ENDPOINT: str | None = None
-
-    def fill_from_env(self) -> None:
-        for env in self.model_fields:
-            env_value = os.getenv(env)
-            setattr(self, env, env_value or None)
-
-
-class IOParameters(pydantic.BaseModel):
-    """\
-Parameters for reading and writing CSV file data.
-"""
-
-    file: str
-    sep: str
-    quotechar: str
-    quoting: int
 
 
 class IOParametersWidget(QtWidgets.QWidget):
@@ -267,41 +167,6 @@ class IOParametersWidget(QtWidgets.QWidget):
         self.qc_edit.setEnabled(self.parameters.quoting != csv.QUOTE_NONE)
 
 
-class RunParameters(pydantic.BaseModel):
-    """\
-Parameters for the run of the program.
-"""
-
-    api: APIParameters
-    env: EnvironmentParameters = pydantic.Field(
-        exclude=True, default_factory=EnvironmentParameters
-    )
-    log: LoggingParameters
-    prof: ProfilingParameters
-    read: IOParameters
-    write: IOParameters
-    format: OutFormat
-    out_dir: str = pydantic.Field(default_factory=os.getcwd)
-
-    @classmethod
-    def from_file(cls, file: str) -> RunParameters:
-        with open(file, "r") as f:
-            json_data = json.load(f)
-        params = RunParameters(**json_data)
-        # Environment variables are not stored in JSON
-        params.env.fill_from_env()
-        return params
-
-    def update(self, json_data: dict) -> None:
-        self.__init__(**json_data)
-        self.log.update(self.log.logging_level)
-
-    def save(self, file: str) -> None:
-        with open(file, "w") as f:
-            json.dump(self.model_dump(), f, indent=2)
-
-
-PARAMS = RunParameters.from_file("default_config.json")
 LOGGER.info(f"Parameters loaded: {json.dumps(PARAMS.model_dump(), indent=2)}")
 LOGGER.setLevel(PARAMS.log.logging_level)
 
@@ -645,728 +510,6 @@ Hacked Httpx client to flush connection pool on timeout.
         except Exception as e:
             LOGGER.error(f"Failed to connect: {type(e)}", exc_info=e)
             raise
-
-
-# Logic classes
-## Prompt cache interface
-class PromptCache:
-    """\
-Interface for a prompt cache.
-
-Saves prompts and answers to avoid re-prompting the same questions and wasting
-tokens.
-"""
-
-    def __init__(self, db_connection: sqlite3.Connection):
-        # TODO: form an event queue for this; sqlite does not do well in
-        # multi-threaded environments
-        self.connection = db_connection
-        self.table_name = "prompt"
-        self.logger = LOGGER.getChild("PromptCache")
-
-        # Create the table if it does not exist in DB
-        table_exists_query = """\
-            SELECT name
-            FROM sqlite_master
-            WHERE type='table' AND name=?;
-        """
-        exists = self.connection.execute(table_exists_query, [self.table_name])
-        if not exists.fetchone():
-            self.logger.info("Creating prompt cache table")
-            with open("init_prompt_cache.sql") as f:
-                self.connection.executescript(f.read())
-                self.connection.commit()
-        else:
-            self.logger.info("Existing prompt table already exists")
-
-    def get(self, model: str, prompt: Prompt, attempt: int) -> str | None:
-        """\
-Get the answer from the cache for specified model.
-"""
-        prompt_dict = prompt.to_json()
-        api_are_none = prompt_dict["api_options"] is None
-
-        query = f"""
-            SELECT response
-            FROM {self.table_name}
-            WHERE
-                attempt = ? AND
-                model = ? AND
-                prompt_text = ? AND
-                prompt_is_json = ? AND
-                api_options {"IS" if api_are_none else "="} ?
-        """
-
-        try:
-            cursor = self.connection.cursor()
-            cursor.execute(
-                query,
-                (attempt, model, *prompt_dict.values()),
-            )
-            if answer := cursor.fetchone():
-                return answer[0]
-            return None
-        except sqlite3.InterfaceError, sqlite3.DatabaseError:
-            self.logger.warning(
-                "Cache access failed for prompt: "
-                + f"{json.dumps(prompt.to_json())}"
-            )
-            return None
-
-    def remember(
-        self, model: str, prompt: Prompt, response: str, attempt: int
-    ) -> None:
-        """\
-Remember the answer for the prompt for the specified model.
-"""
-        query = f"""
-            INSERT INTO {self.table_name} (
-                attempt,
-                model,
-                prompt_text,
-                prompt_is_json,
-                api_options,
-                response
-            )
-            VALUES (?, ?, ?, ?, ?, ?)
-        """
-        # Convert prompt to serializable format
-        prompt_dict = prompt.to_json()
-
-        cursor = self.connection.cursor()
-        cursor.execute(
-            query,
-            (
-                attempt,
-                model,
-                *prompt_dict.values(),
-                response,
-            ),
-        )
-        self.connection.commit()
-
-
-## Logic prompter classes
-### Decorators
-AttemptCount = int
-PromptAnswerT = TypeVar(
-    "PromptAnswerT", bool, Union[SCTDescription, EscapeHatch]
-)
-
-
-def ask_many(method: Callable[..., Coroutine[Any, Any, PromptAnswerT]]):
-    """\
-Decorator for methods that require prompting. Will repeat the prompt until
-enough correct answers are received.
-"""
-
-    @wraps(method)
-    async def wrapper(self, *args, **kwargs) -> PromptAnswerT:
-        attempt = 1
-        winning_attempts = math.ceil(self.min_attempts / 2)
-        options_count: Counter[SCTDescription | bool | EscapeHatch] = Counter()
-        while True:
-            kwargs["attempt"] = attempt
-            answer = await method(self, *args, **kwargs)
-            options_count.update([answer])
-            if options_count[answer] >= winning_attempts:
-                return answer
-            attempt += 1
-
-    return wrapper
-
-
-### Prompters
-class Prompter(ABC):
-    """\
-Interfaces prompts to the LLM agent and parses answers.
-"""
-
-    _model_id: str = "UNKNOWN"
-    min_attempts: int = DEFAULT_REPEAT_PROMPTS
-
-    def __init__(
-        self,
-        *args,
-        prompt_format: PromptFormat,
-        **kwargs,
-    ):
-        _ = args, kwargs
-        self.prompt_format = prompt_format
-        self.cache: PromptCache | None = None
-        self.logger = LOGGER.getChild(self.__class__.__name__)
-        if PARAMS.api.cache_db is not None:
-            try:
-                conn = sqlite3.connect(
-                    PARAMS.api.cache_db, check_same_thread=False
-                )
-            except Exception as e:
-                self.logger.error(
-                    "Could not connect (create) to the cache DB", exc_info=e
-                )
-                raise PrompterInitError(e)
-
-            self.cache = PromptCache(conn)
-
-    @staticmethod
-    def unwrap_class_answer(
-        answer: str,
-        options: Iterable[SCTDescription] = (),
-        escape_hatch: SCTDescription | None = EscapeHatch.WORD,
-    ) -> SCTDescription | EscapeHatch:
-        """\
-Check if answer has exactly one valid option.
-
-Assumes that the answer is a valid option if it is wrapped in brackets.
-"""
-        last_line = answer.strip().splitlines()[-1]
-        # Try to parse the last line, then the answer as a whole
-        look_at = [last_line, answer]
-
-        if not options:
-            for text in look_at:
-                # Return the answer in brackets, if there is one
-                if text.count("[") == text.count("]") == 1:
-                    start = text.index("[") + 1
-                    end = text.index("]")
-                    return SCTDescription(text[start:end])
-
-            raise PrompterError(
-                "Could not find a unique option in the answer:", last_line
-            )
-
-        wrapped_options = {
-            PromptFormat.wrap_term(option): option for option in options
-        }
-
-        if escape_hatch is not None:
-            wrapped_options = {
-                **wrapped_options,
-                EscapeHatch.WORD: escape_hatch,
-            }
-
-        for text in look_at:
-            counts = {}
-            for option in wrapped_options:
-                counts[option] = text.count(option)
-
-            # Check if there is exactly one option present
-            if sum(map(bool, counts.values())) == 1:
-                for option, count in counts.items():
-                    if count:
-                        return (
-                            SCTDescription(option[1:-1])
-                            if option != escape_hatch
-                            else NULL_ANSWER
-                        )
-
-            # Return the last encountered option in brackets
-            indices: dict[SCTDescription | EscapeHatch, int] = {
-                option: text.rfind(wrapped)
-                for wrapped, option in wrapped_options.items()
-            }
-            if any(index != -1 for index in indices.values()):
-                return max(indices, key=lambda k: indices.get(k, -1))
-
-        raise PrompterError(
-            "Could not find a unique option in the answer:", last_line
-        )
-
-    @staticmethod
-    def unwrap_bool_answer(
-        answer: str,
-        yes: str = BooleanAnswer.YES,
-        no: str = BooleanAnswer.NO,
-    ) -> bool:
-        """\
-Check if the answer contains a yes or no option.
-"""
-        if yes in answer and no not in answer:
-            return True
-        elif no in answer and yes not in answer:
-            return False
-        else:
-            raise PrompterError(
-                "Could not find an unambiguous boolean answer in the response"
-            )
-
-    @ask_many
-    async def prompt_supertype(
-        self,
-        term: str,
-        options: Iterable[SCTDescription],
-        allow_escape: bool = True,
-        term_context: str | None = None,
-        options_context: dict[SCTDescription, str] | None = None,
-        attempt: int = 1,
-    ) -> SCTDescription | EscapeHatch:
-        """\
-Prompt the model to choose the best matching proximal ancestor for a term.
-"""
-        # Construct the prompt
-        prompt: Prompt = self.prompt_format.form_supertype(
-            term, options, allow_escape, term_context, options_context
-        )
-        self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
-        self.logger.debug(f"Getting answer #{attempt}")
-
-        if cached_answer := self.cache_get(prompt, attempt):
-            answer = self.unwrap_class_answer(
-                cached_answer,
-                options,
-                EscapeHatch.WORD if allow_escape else None,
-            )
-        else:
-            # Get the answer
-            answer = await self._prompt_class_answer(
-                allow_escape, options, prompt, attempt
-            )
-        self.logger.info(f"Agent answer: {answer} is a supertype of {term}")
-        return answer
-
-    @ask_many
-    async def prompt_attr_presence(
-        self,
-        term: str,
-        attribute: SCTDescription,
-        term_context: str | None = None,
-        attribute_context: str | None = None,
-        attempt: int = 1,
-    ) -> bool:
-        prompt: Prompt = self.prompt_format.form_attr_presence(
-            term, attribute, term_context, attribute_context
-        )
-        self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
-        self.logger.debug(f"Getting answer #{attempt}")
-
-        if cached_answer := self.cache_get(prompt, attempt):
-            answer = self.unwrap_bool_answer(cached_answer)
-        else:
-            answer = await self._prompt_bool_answer(prompt, attempt)
-        self.logger.info(
-            f"Agent answer: The attribute '{attribute}' is "
-            f"{'present' if answer else 'absent'} in '{term}'"
-        )
-        return answer
-
-    @ask_many
-    async def prompt_attr_value(
-        self,
-        term: str,
-        attribute: SCTDescription,
-        options: Iterable[SCTDescription],
-        term_context: str | None = None,
-        attribute_context: str | None = None,
-        options_context: dict[SCTDescription, str] | None = None,
-        allow_escape: bool = True,
-        attempt: int = 1,
-    ) -> SCTDescription | EscapeHatch:
-        """\
-Prompt the model to choose the value of an attribute in a term.
-"""
-        prompt: Prompt = self.prompt_format.form_attr_value(
-            term,
-            attribute,
-            options,
-            term_context,
-            attribute_context,
-            options_context,
-            allow_escape,
-        )
-        self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
-        self.logger.debug(f"Getting answer #{attempt}")
-
-        if cached_answer := self.cache_get(prompt, attempt):
-            answer = self.unwrap_class_answer(
-                cached_answer,
-                options,
-                EscapeHatch.WORD if allow_escape else None,
-            )
-        else:
-            answer = await self._prompt_class_answer(
-                allow_escape, options, prompt, attempt
-            )
-
-        self.logger.info(
-            f"Agent answer: The value of the attribute '{attribute}' in "
-            f"'{term}' is '{answer}'"
-        )
-        return answer
-
-    @ask_many
-    async def prompt_subsumption(
-        self,
-        term: str,
-        prospective_supertype: SCTDescription,
-        term_context: str | None = None,
-        supertype_context: str | None = None,
-        attempt: int = 1,
-    ) -> bool:
-        """\
-Prompt the model to decide if a term is a subtype of a prospective supertype.
-
-Only meant to be used for Primitive concepts: use Bouzyges.check_subsumption for
-Fully Defined concepts.
-"""
-        prompt: Prompt = self.prompt_format.form_subsumption(
-            term, prospective_supertype, term_context, supertype_context
-        )
-        self.logger.debug(f"Constructed prompt: f{prompt.prompt_message}")
-        self.logger.debug(f"Getting answer #{attempt}")
-
-        if cached_answer := self.cache_get(prompt, attempt):
-            answer = self.unwrap_bool_answer(cached_answer)
-        else:
-            answer = await self._prompt_bool_answer(prompt, attempt)
-
-        self.logger.info(
-            f"From cache: The term '{term}' is "
-            f"{'a subtype' if answer else 'not a subtype'} "
-            f"of '{prospective_supertype}'"
-        )
-        return answer
-
-    def cache_remember(self, prompt: Prompt, answer: str, attempt: int) -> None:
-        if self.cache:
-            self.cache.remember(self._model_id, prompt, answer, attempt)
-
-    def cache_get(self, prompt: Prompt, attempt: int) -> str | None:
-        if self.cache:
-            return self.cache.get(self._model_id, prompt, attempt)
-        return None
-
-    # Following methods are abstract and represent common queries to the model
-    @abstractmethod
-    async def _prompt_bool_answer(
-        self, prompt: Prompt, record_attempt: int
-    ) -> bool:
-        """\
-Send a prompt to the counterpart agent to obtain the answer
-"""
-
-    @abstractmethod
-    async def _prompt_class_answer(
-        self,
-        allow_escape: bool,
-        options: Iterable[SCTDescription],
-        prompt: Prompt,
-        record_attempt: int,
-    ) -> SCTDescription | EscapeHatch:
-        """\
-Send a prompt to the counterpart agent to obtain a single choice answer.
-"""
-
-    @abstractmethod
-    def ping(self) -> bool:
-        """\
-Check if the API is available.
-"""
-
-    @abstractmethod
-    def report_usage(self) -> None:
-        """\
-Report the usage of the API to the provider.
-
-Form is not specified, as it is provider-specific.
-"""
-
-
-class HumanPrompter(Prompter):
-    """\
-A test prompter that interacts with a human to get answers.
-"""
-
-    _model_id = "human"
-    # Only ask the human once
-    min_attempts = 1
-
-    def __init__(self, *args, prompt_function: Callable[[str], str], **kwargs):
-        super().__init__(*args, **kwargs)
-        self.prompt_function = prompt_function
-
-    async def _prompt_class_answer(
-        self, allow_escape, options, prompt, record_attempt
-    ):
-        while True:
-            brain_answer = self.prompt_function("Answer: ").strip()
-            try:
-                answer = self.unwrap_class_answer(
-                    brain_answer,
-                    options,
-                    EscapeHatch.WORD if allow_escape else None,
-                )
-                self.cache_remember(prompt, brain_answer, record_attempt)
-                return answer
-
-            except PrompterError as e:
-                logging.error("Error: %s", e)
-
-    async def _prompt_bool_answer(
-        self, prompt: Prompt, record_attempt: int
-    ) -> bool:
-        while True:
-            brain_answer = self.prompt_function("Answer: ").strip()
-            try:
-                answer = self.unwrap_bool_answer(brain_answer)
-                self.cache_remember(prompt, brain_answer, record_attempt)
-                return answer
-            except PrompterError as e:
-                logging.error("Error: %s", e)
-
-    def ping(self) -> bool:
-        self.prompt_function("Press Enter to confirm you are here")
-        return True
-
-    def report_usage(self) -> None:
-        self.logger.info(
-            "No usage to report, as this is a human prompter. Stay "
-            "hydrated and have a good day!"
-        )
-
-
-class OpenAIPrompter(Prompter):
-    """\
-A prompter that interfaces with the OpenAI API using.
-"""
-
-    def __init__(
-        self,
-        *args,
-        http_client: httpx.AsyncClient,
-        repeat_prompts: int | None = None,
-        model: str,
-        **kwargs,
-    ):
-        super().__init__(*args, **kwargs)
-
-        self._model_id = model
-        self._init_client(*args, http_client=http_client, **kwargs)
-
-        if repeat_prompts is not None:
-            self.min_attempts = repeat_prompts
-
-        self._estimated_token_usage: dict[Prompt, int] = {}
-        self._actual_token_usage: dict[Prompt, int] = {}
-        if tiktoken is not None:
-            try:
-                self._estimation_encoding = tiktoken.encoding_for_model(
-                    self._model_id
-                )
-            except KeyError:
-                self.logger.warning("Model not found in the tokenizer")
-                self._estimation_encoding = None
-        else:
-            self.logger.warning(
-                "Tiktoken not installed, can't track token usage"
-            )
-            self._estimation_encoding = None
-
-    def _init_client(self, *args, http_client: httpx.AsyncClient, **kwargs):
-        self.logger.info("Initializing the OpenAI API client...")
-        _ = args, kwargs
-        # API Key will be picked up from env variables
-        # self._api_key = api_key
-        if not os.getenv("OPENAI_API_KEY"):
-            raise PrompterInitError(
-                f"Can not initialize {self} without OPENAI_API_KEY"
-            )
-
-        self._client = openai.AsyncOpenAI(
-            http_client=http_client,
-            max_retries=1,  # Retry only once, as we have our own retry logic
-        )
-        self._ping_headers = {}
-
-    async def _ping(self):
-        try:
-            return await self._client.models.list(
-                extra_headers=self._ping_headers, timeout=5
-            )
-        except Exception as e:
-            self.logger.warning(f"Connection timed out: {e}", exc_info=e)
-            raise
-
-    def ping(self) -> bool:
-        self.logger.info("Pinging the OpenAI API...")
-        # Ping by retrieving the list of models
-        try:
-            models = asyncio.run(self._ping())
-        except Exception as e:
-            self.logger.warning(f"API is not available: {e}")
-            return False
-
-        response: dict = models.model_dump()
-        success = response.get("data", []) != []
-        if success:
-            self.logger.info("API is available")
-            self.logger.debug(
-                f"Models: {json.dumps(response['data'], indent=2)}"
-            )
-            if not any(self._model_id == obj["id"] for obj in response["data"]):
-                self.logger.warning(
-                    f"'{self._model_id}' is not present in the API response!"
-                )
-                return False
-            return True
-
-        self.logger.warning("API is not available")
-        return False
-
-    async def _prompt_bool_answer(
-        self, prompt: Prompt, record_attempt: int
-    ) -> bool:
-        return await self._prompt_answer(
-            prompt, self.unwrap_bool_answer, record_attempt
-        )
-
-    async def _prompt_class_answer(
-        self, allow_escape, options, prompt, record_attempt
-    ):
-        return await self._prompt_answer(
-            prompt,
-            lambda x: self.unwrap_class_answer(
-                x, options, EscapeHatch.WORD if allow_escape else None
-            ),
-            record_attempt,
-        )
-
-    async def _prompt_answer(
-        self,
-        prompt: Prompt,
-        parser: Callable[[str], T],
-        attempt,
-        parse_retries_left=3,
-    ) -> T:
-        self.logger.info("Trying cache for answer...")
-        if cached_answer := self.cache_get(prompt, attempt):
-            answer = parser(cached_answer)
-            self.logger.info("Cache hit!")
-            return answer
-        else:
-            self.logger.info("Cache miss")
-
-        self.logger.info("Prompting the OpenAI API for an answer...")
-
-        if self._estimation_encoding:
-            token_count = len(
-                self._estimation_encoding.encode(
-                    json.dumps(prompt.prompt_message)
-                )
-            )
-            self._estimated_token_usage[prompt] = token_count
-            self.logger.debug(
-                f"Estimated token usage for prompt: {token_count}"
-            )
-        else:
-            self.logger.warning(
-                "Token usage will not be estimated: unknown model"
-            )
-
-        self.logger.debug(
-            f"Prompt message {json.dumps(prompt.prompt_message, indent=2)}"
-        )
-
-        if isinstance(prompt.prompt_message, str):
-            messages = [
-                {
-                    "role": "system",
-                    "message": prompt.prompt_message,
-                },
-            ]
-        else:
-            messages = prompt.prompt_message
-
-        try:
-            brain_answer = await self._get_completion(
-                messages=messages,  # type: ignore
-                **(prompt.api_options or {}),
-            )
-        except openai.APIError as e:
-            self.logger.error(f"API error: {e}", exc_info=e)
-            raise PrompterError("Failed to get a response from the API")
-
-        response_message = brain_answer.choices[0].message.content
-        if self._estimation_encoding:
-            token_count = len(
-                self._estimation_encoding.encode(response_message)
-            )
-            self._estimated_token_usage[prompt] = (
-                self._estimated_token_usage.get(prompt, 0) + token_count
-            )
-            self.logger.debug(
-                f"Estimated token usage for answer: {token_count}"
-            )
-
-        self._actual_token_usage[prompt] = (
-            self._actual_token_usage.get(prompt, 0)
-            + brain_answer.usage.total_tokens
-        )
-
-        self.logger.debug(f"Literal response: {response_message}")
-        try:
-            answer = parser(response_message)
-            self.cache_remember(prompt, response_message, attempt)
-            return answer
-        except PrompterError as e:
-            # Recursively call self if LLM fails to provide a parsable answer
-            self.logger.error(f"Error parsing response: {e}")
-            if parse_retries_left > 0:
-                self.logger.warning(
-                    f"Retrying parsing the answer, "
-                    f"attempts left: {parse_retries_left}",
-                    exc_info=e,
-                )
-                return await self._prompt_answer(
-                    prompt, parser, attempt, parse_retries_left - 1
-                )
-            raise PrompterError("Failed to parse the answer")
-
-    @retry_exponential
-    async def _get_completion(self, messages, **kwargs):
-        return await self._client.chat.completions.create(
-            messages=messages,  # type: ignore
-            model=self._model_id,
-            **kwargs,
-        )
-
-    def report_usage(self) -> None:
-        self.logger.info("Reporting usage to the OpenAI API...")
-        if self._estimated_token_usage:
-            n_prompts = len(self._estimated_token_usage)
-            total_tokens = sum(self._estimated_token_usage.values())
-            self.logger.info(
-                f"Estimation: reporting {n_prompts} prompts with a total of "
-                f"{total_tokens} tokens"
-            )
-        else:
-            self.logger.warning("No estimation of token usage to report")
-
-        n_prompts = len(self._actual_token_usage)
-        total_tokens = sum(self._actual_token_usage.values())
-        self.logger.info(
-            f"Actual: reporting {n_prompts} prompts with a total of "
-            f"{total_tokens} tokens"
-        )
-
-
-class OpenAIAzurePrompter(OpenAIPrompter):
-    """\
-A prompter that interfaces with the OpenAI API using Azure.
-"""
-
-    DEFAULT_VERSION = "2024-06-01"
-
-    def _init_client(
-        self, http_client: httpx.AsyncClient, api_key: str, azure_endpoint: str
-    ):
-        self.logger.info("Initializing the Azure API client...")
-        self._client = openai.AsyncAzureOpenAI(
-            api_key=api_key,
-            azure_endpoint=azure_endpoint,
-            api_version=self.DEFAULT_VERSION,
-            http_client=http_client,
-        )
-        self._ping_headers = {"api-key": self._client.api_key}
 
 
 class SnowstormAPI:
@@ -2311,6 +1454,7 @@ Initialize the SnowstormAPI object.
             case "openai":
                 prompter = OpenAIPrompter(
                     prompt_format=OpenAIPromptFormat(),
+                    api_parameters=PARAMS.api,
                     http_client=http_client,
                     repeat_prompts=repeat_prompts,
                     model=PARAMS.api.llm_model_id,
@@ -2319,6 +1463,7 @@ Initialize the SnowstormAPI object.
             case "azure":
                 prompter = OpenAIAzurePrompter(
                     prompt_format=OpenAIPromptFormat(),
+                    api_parameters=PARAMS.api,
                     http_client=http_client,
                     repeat_prompts=repeat_prompts,
                     api_key=PARAMS.env.AZURE_API_KEY,
@@ -2327,6 +1472,7 @@ Initialize the SnowstormAPI object.
                 )
             case "human":
                 prompter = HumanPrompter(
+                    api_parameters=PARAMS.api,
                     prompt_function=input,
                     prompt_format=VerbosePromptFormat(),
                 )
